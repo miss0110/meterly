@@ -1,0 +1,320 @@
+//! Refresh engine + polling scheduler (T8).
+//!
+//! Every cycle (default 3 min) each source scans in ISOLATION: one source's
+//! Error/panic never blocks the other (AC4). Claude re-parses fully and its
+//! buckets are REPLACED; Codex scans incrementally via uuid cursors and its
+//! buckets are ADDITIVE (rebuild-on-flag is the only recovery path).
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use chrono::{Local, Utc};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::aggregate::{self, DailyBucket};
+use crate::cache::{self, CacheV1};
+use crate::model::{RateLimitStatus, SourceHealth, SourceId};
+use crate::sources::{self, RecentEvents, SourceCursors, UsageSource};
+
+pub const REFRESH_INTERVAL_SECS: u64 = 180;
+
+pub struct AppState(pub Mutex<Engine>);
+
+pub struct Engine {
+    cache_path: PathBuf,
+    pub cache: CacheV1,
+    runtimes: Vec<Runtime>,
+}
+
+struct Runtime {
+    id: SourceId,
+    display_name: &'static str,
+    source: Box<dyn UsageSource>,
+}
+
+// ---- IPC payload shapes (plan: Contract surface) ----
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenBreakdown {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceSummary {
+    pub id: SourceId,
+    pub display_name: String,
+    pub health: SourceHealth,
+    pub today_tokens: TokenBreakdown,
+    pub today_cost_usd: Option<f64>,
+    pub rate_limit: RateLimitStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Summary {
+    pub generated_at: chrono::DateTime<Utc>,
+    pub sources: Vec<SourceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardRow {
+    pub period: String,
+    pub source: SourceId,
+    pub model: Option<String>,
+    pub tokens: TokenBreakdown,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardData {
+    pub range: String,
+    pub rows: Vec<DashboardRow>,
+    pub timezone_note: String,
+}
+
+impl Engine {
+    pub fn new() -> Self {
+        let cache_path = cache::cache_path();
+        let cache = cache::load(&cache_path).unwrap_or_default();
+        let runtimes = sources::registry()
+            .into_iter()
+            .filter_map(|entry| {
+                let make = entry.make_source?;
+                Some(Runtime {
+                    id: entry.id,
+                    display_name: entry.display_name,
+                    source: make(entry.root_path),
+                })
+            })
+            .collect();
+        Self {
+            cache_path,
+            cache,
+            runtimes,
+        }
+    }
+
+    /// One refresh cycle: scan every source (isolated), fold aggregates,
+    /// persist the cache, return the fresh summary.
+    pub fn refresh(&mut self) -> Summary {
+        let today = Local::now().date_naive();
+        let window_start = aggregate::backfill_start(today);
+        self.cache.version = cache::CACHE_VERSION;
+        self.cache.backfill_start = Some(window_start);
+
+        for rt in &mut self.runtimes {
+            // Isolation (AC4): a panicking source must not kill the cycle.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match rt.id {
+                SourceId::ClaudeCode => {
+                    let outcome = rt.source.scan(&SourceCursors::default());
+                    if !matches!(rt.source.health(), SourceHealth::Error { .. }) {
+                        // Full re-parse: REPLACE claude aggregates.
+                        self.cache.daily_claude.clear();
+                        aggregate::ingest(
+                            &mut self.cache.daily_claude,
+                            &outcome.events,
+                            window_start,
+                        );
+                        let cutoff =
+                            Utc::now() - chrono::Duration::hours(aggregate::RECENT_RETENTION_HOURS);
+                        self.cache
+                            .recent_events
+                            .retain(|e| e.source != SourceId::ClaudeCode);
+                        self.cache.recent_events.extend(
+                            outcome
+                                .events
+                                .iter()
+                                .filter(|e| e.timestamp >= cutoff)
+                                .cloned(),
+                        );
+                    }
+                }
+                SourceId::Codex => {
+                    let mut outcome = rt.source.scan(&self.cache.codex_cursors.clone());
+                    if outcome.needs_rebuild {
+                        // Truncation backstop: discard codex state, rescan
+                        // once from scratch (always-correct recovery).
+                        self.cache.codex_cursors = SourceCursors::default();
+                        self.cache.daily_codex.clear();
+                        outcome = rt.source.scan(&SourceCursors::default());
+                    }
+                    aggregate::ingest(&mut self.cache.daily_codex, &outcome.events, window_start);
+                    if let Some(cursors) = outcome.cursors {
+                        self.cache.codex_cursors = cursors;
+                    }
+                    let cutoff =
+                        Utc::now() - chrono::Duration::hours(aggregate::RECENT_RETENTION_HOURS);
+                    self.cache
+                        .recent_events
+                        .extend(outcome.events.iter().filter(|e| e.timestamp >= cutoff).cloned());
+                }
+            }));
+            if result.is_err() {
+                eprintln!("meterly: source {:?} panicked during scan (isolated)", rt.id);
+            }
+        }
+
+        // Retention + window pruning.
+        let cutoff = Utc::now() - chrono::Duration::hours(aggregate::RECENT_RETENTION_HOURS);
+        self.cache.recent_events.retain(|e| e.timestamp >= cutoff);
+        aggregate::prune(&mut self.cache.daily_claude, window_start);
+        aggregate::prune(&mut self.cache.daily_codex, window_start);
+
+        if let Err(err) = cache::save(&self.cache_path, &self.cache) {
+            eprintln!("meterly: cache save failed: {err}");
+        }
+        self.summary()
+    }
+
+    /// Build the summary from current state (no rescan).
+    pub fn summary(&self) -> Summary {
+        let today = Local::now().date_naive();
+        let now = Utc::now();
+        let sources = self
+            .runtimes
+            .iter()
+            .map(|rt| {
+                let buckets: Vec<&DailyBucket> = self
+                    .all_buckets()
+                    .into_iter()
+                    .filter(|b| b.source == rt.id && b.date == today)
+                    .collect();
+                let mut tk = TokenBreakdown {
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_creation: 0,
+                    total: 0,
+                };
+                let mut cost: Option<f64> = None;
+                for b in &buckets {
+                    tk.input += b.input;
+                    tk.output += b.output;
+                    tk.cache_read += b.cache_read;
+                    tk.cache_creation += b.cache_creation;
+                    if let Some(c) = b.cost_usd() {
+                        *cost.get_or_insert(0.0) += c;
+                    }
+                }
+                tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
+                let rate_limit = match rt.id {
+                    SourceId::ClaudeCode => {
+                        aggregate::claude_window_estimate(&self.cache.recent_events, now)
+                    }
+                    SourceId::Codex => rt
+                        .source
+                        .rate_limit(&RecentEvents(self.cache.recent_events.clone())),
+                };
+                SourceSummary {
+                    id: rt.id,
+                    display_name: rt.display_name.to_string(),
+                    health: rt.source.health(),
+                    today_tokens: tk,
+                    today_cost_usd: cost,
+                    rate_limit,
+                }
+            })
+            .collect();
+        Summary {
+            generated_at: now,
+            sources,
+        }
+    }
+
+    pub fn dashboard(&self, range: &str) -> DashboardData {
+        let today = Local::now().date_naive();
+        let start = aggregate::range_start(range, today).unwrap_or(today);
+        let mut rows: Vec<DashboardRow> = Vec::new();
+        for b in self.all_buckets() {
+            if b.date < start {
+                continue;
+            }
+            let Some(period) = aggregate::period_key(range, b.date) else {
+                continue;
+            };
+            let found = rows.iter_mut().find(|r| {
+                r.period == period && r.source == b.source && r.model == b.model
+            });
+            match found {
+                Some(row) => {
+                    row.tokens.input += b.input;
+                    row.tokens.output += b.output;
+                    row.tokens.cache_read += b.cache_read;
+                    row.tokens.cache_creation += b.cache_creation;
+                    row.tokens.total += b.total();
+                    if let Some(c) = b.cost_usd() {
+                        *row.cost_usd.get_or_insert(0.0) += c;
+                    }
+                }
+                None => rows.push(DashboardRow {
+                    period,
+                    source: b.source,
+                    model: b.model.clone(),
+                    tokens: TokenBreakdown {
+                        input: b.input,
+                        output: b.output,
+                        cache_read: b.cache_read,
+                        cache_creation: b.cache_creation,
+                        total: b.total(),
+                    },
+                    cost_usd: b.cost_usd(),
+                }),
+            }
+        }
+        rows.sort_by(|a, b| a.period.cmp(&b.period));
+        DashboardData {
+            range: range.to_string(),
+            rows,
+            timezone_note: format!(
+                "'오늘' 경계는 시스템 로컬 타임존({}) 자정 기준 — UTC 기준 도구와 다를 수 있음",
+                Local::now().format("%Z")
+            ),
+        }
+    }
+
+    fn all_buckets(&self) -> Vec<&DailyBucket> {
+        self.cache
+            .daily_claude
+            .iter()
+            .chain(self.cache.daily_codex.iter())
+            .collect()
+    }
+}
+
+/// Tray title token formatter ("12.3M" style — mirrors format.ts).
+pub fn format_tokens(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}K", n as f64 / 1_000.0),
+        1_000_000..=999_999_999 => format!("{:.1}M", n as f64 / 1_000_000.0),
+        _ => format!("{:.1}B", n as f64 / 1_000_000_000.0),
+    }
+}
+
+/// Refresh once and push results to the UI + tray. Runs on a worker thread.
+pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
+    let state = app.state::<AppState>();
+    let summary = {
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.refresh()
+    };
+    let today_total: u64 = summary.sources.iter().map(|s| s.today_tokens.total).sum();
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_title(Some(format_tokens(today_total)));
+    }
+    let _ = app.emit("usage-updated", &summary);
+    Some(summary)
+}
+
+/// Background polling loop (plain thread — scans are blocking file IO).
+pub fn start(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        let _ = refresh_and_publish(&app);
+        std::thread::sleep(Duration::from_secs(REFRESH_INTERVAL_SECS));
+    });
+}

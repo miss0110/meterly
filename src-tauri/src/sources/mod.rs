@@ -16,11 +16,19 @@ use serde::{Deserialize, Serialize};
 use crate::model::{RateLimitStatus, SourceHealth, SourceId, UsageEvent};
 
 /// Incremental-scan cursor for one log file (cache schema `cursors` entry).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `prev_total` / `model` carry Codex per-file parser state (T1 (a) baseline
+/// and turn_context attribution) across incremental scans; Claude ignores
+/// them (its scan is a cheap full re-parse — 54MB corpus).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CursorEntry {
     pub offset: u64,
     pub size: u64,
     pub mtime_epoch: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Cursor map for one source. Key semantics are per-source: Claude uses the
@@ -35,6 +43,10 @@ pub struct ScanOutcome {
     /// True when cursors are untrustworthy (e.g. truncation) and the cache
     /// must be rebuilt from scratch.
     pub needs_rebuild: bool,
+    /// Updated cursor state to persist when the source scans incrementally
+    /// (Codex). `None` = full-parse source (Claude): its events REPLACE the
+    /// source's aggregates instead of adding to them.
+    pub cursors: Option<SourceCursors>,
 }
 
 /// Recent events window handed to `rate_limit` (kept by the scheduler, T6).
@@ -142,6 +154,7 @@ mod tests {
                     cache_creation_tokens: 0,
                 }],
                 needs_rebuild: false,
+                cursors: None,
             }
         }
         fn health(&self) -> SourceHealth {

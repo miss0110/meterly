@@ -1,5 +1,9 @@
+pub mod aggregate;
+pub mod cache;
+pub mod commands;
 pub mod model;
 pub mod pricing;
+pub mod scheduler;
 pub mod sources;
 
 use tauri::{
@@ -23,22 +27,19 @@ fn toggle_popover(app: &AppHandle) {
     }
 }
 
-/// Placeholder command: opens the dashboard window (real UI arrives in T10).
-#[tauri::command]
-fn open_dashboard(app: AppHandle) -> Result<(), String> {
-    let Some(dashboard) = app.get_webview_window("dashboard") else {
-        return Err("dashboard window not found".into());
-    };
-    dashboard.show().map_err(|e| e.to_string())?;
-    dashboard.set_focus().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
-        .invoke_handler(tauri::generate_handler![open_dashboard])
+        .manage(scheduler::AppState(std::sync::Mutex::new(
+            scheduler::Engine::new(),
+        )))
+        .invoke_handler(tauri::generate_handler![
+            commands::get_summary,
+            commands::get_dashboard,
+            commands::refresh_now,
+            commands::open_dashboard
+        ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.
             #[cfg(target_os = "macos")]
@@ -64,6 +65,10 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Background polling (default 3 min) — first refresh runs
+            // immediately, so the tray title fills in shortly after launch.
+            scheduler::start(app.handle().clone());
 
             Ok(())
         })
