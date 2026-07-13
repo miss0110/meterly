@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the popover and dashboard windows",
+  "windows": ["popover", "dashboard"],
+  "permissions": [
+    "core:default",
+    "positioner:default"
+  ]
+}
