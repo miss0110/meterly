@@ -511,7 +511,15 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
                 Some(format_tokens(total))
             }
         };
+        // macOS shows text next to the tray icon; Windows has no tray
+        // title, so the number goes into the hover tooltip instead.
+        #[cfg(target_os = "macos")]
         let _ = tray.set_title(title);
+        #[cfg(not(target_os = "macos"))]
+        let _ = tray.set_tooltip(Some(match title {
+            Some(t) => format!("meterly — 오늘 {t}"),
+            None => "meterly".to_string(),
+        }));
     }
     let _ = app.emit("usage-updated", &summary);
     Some(summary)
