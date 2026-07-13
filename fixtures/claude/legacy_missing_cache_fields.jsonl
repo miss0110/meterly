@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-07-09T01:30:00.000Z", "sessionId": "aaaaaaaa-0000-4000-8000-00000000000a", "requestId": "req_fixture_legacy_01", "message": {"id": "msg_fixture_legacy_01", "model": "claude-fable-5", "usage": {"input_tokens": 40, "output_tokens": 5, "service_tier": "standard"}}}

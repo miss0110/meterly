@@ -1,0 +1,4 @@
+{"type": "assistant", "timestamp": "2026-07-09T01:59:00.000Z", "message": {
+{"type": "user", "timestamp": "2026-07-09T01:59:30.000Z", "sessionId": "aaaaaaaa-0000-4000-8000-00000000000a"}
+this is not json at all {{{
+{"type": "assistant", "timestamp": "2026-07-09T02:00:00.000Z", "sessionId": "aaaaaaaa-0000-4000-8000-00000000000a", "requestId": "req_fixture_malformed_01", "message": {"id": "msg_fixture_malformed_01", "model": "claude-fable-5", "usage": {"input_tokens": 42, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "output_tokens": 7, "service_tier": "standard", "inference_geo": "not_available"}}}
