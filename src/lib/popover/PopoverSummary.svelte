@@ -99,6 +99,11 @@
             <span class="cost" title="구독 요금이 아닌 API 정가 환산값">
               {LABEL_COST}
               {s.today_cost_usd === null ? LABEL_COST_NA : formatCost(s.today_cost_usd)}
+              {#if s.today_cache_saved_usd !== null && s.today_cache_saved_usd >= 0.01}
+                <span class="saved" title="캐시 읽기를 정가 입력으로 환산했을 때 대비 절약액">
+                  캐시로 {formatCost(s.today_cache_saved_usd)} 절약
+                </span>
+              {/if}
             </span>
           </div>
           <div class="row limit">
@@ -204,6 +209,19 @@
   .muted {
     opacity: 0.65;
     font-size: 0.8rem;
+  }
+  .cost {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.1rem;
+    font-size: 0.8rem;
+    opacity: 0.85;
+  }
+  .saved {
+    color: #008300;
+    font-size: 0.72rem;
+    font-weight: 600;
   }
   .small {
     font-size: 0.72rem;

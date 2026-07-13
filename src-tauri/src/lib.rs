@@ -7,10 +7,11 @@ pub mod scheduler;
 pub mod sources;
 
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_positioner::{Position, WindowExt};
 
 /// Toggle the popover window: hide when visible, otherwise position it near
@@ -32,6 +33,11 @@ fn toggle_popover(app: &AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(scheduler::AppState(std::sync::Mutex::new(
             scheduler::Engine::new(),
         )))
@@ -46,14 +52,22 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Tray context menu (right-click): 대시보드 / 새로고침 / 종료.
-            // Left-click keeps toggling the popover.
+            // Tray context menu (right-click): 대시보드 / 새로고침 /
+            // 자동 시작 토글 / 종료. Left-click keeps toggling the popover.
+            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            let autostart_item =
+                CheckMenuItemBuilder::with_id("autostart", "로그인 시 자동 시작")
+                    .checked(autostart_enabled)
+                    .build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
                 .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
                 .separator()
+                .item(&autostart_item)
+                .separator()
                 .item(&MenuItemBuilder::with_id("quit", "meterly 종료").build(app)?)
                 .build()?;
+            let autostart_check = autostart_item.clone();
 
             // Tray icon. The title shows today's total tokens after the
             // first refresh; "–" is the placeholder until then.
@@ -63,7 +77,7 @@ pub fn run() {
                 .title("–")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
+                .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
                     "dashboard" => {
                         let _ = commands::open_dashboard(app.clone());
@@ -73,6 +87,18 @@ pub fn run() {
                         std::thread::spawn(move || {
                             let _ = scheduler::refresh_and_publish(&app);
                         });
+                    }
+                    "autostart" => {
+                        let launcher = app.autolaunch();
+                        let now_enabled = launcher.is_enabled().unwrap_or(false);
+                        let result = if now_enabled {
+                            launcher.disable()
+                        } else {
+                            launcher.enable()
+                        };
+                        if result.is_ok() {
+                            let _ = autostart_check.set_checked(!now_enabled);
+                        }
                     }
                     _ => {}
                 })

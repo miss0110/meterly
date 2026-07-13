@@ -118,6 +118,9 @@
           <div class="card-sub">
             {LABEL_COST}
             {s.today_cost_usd === null ? LABEL_COST_NA : formatCost(s.today_cost_usd)}
+            {#if s.today_cache_saved_usd !== null && s.today_cache_saved_usd >= 0.01}
+              · <span class="saved">캐시로 {formatCost(s.today_cache_saved_usd)} 절약</span>
+            {/if}
             {#if s.rate_limit !== "unavailable" && "estimated" in s.rate_limit}
               · <b>{LABEL_ESTIMATED}</b> 창 {formatTokens(s.rate_limit.estimated.window_tokens)}
             {:else if s.rate_limit !== "unavailable" && "measured" in s.rate_limit}
@@ -259,6 +262,10 @@
   .card-sub {
     font-size: 0.75rem;
     opacity: 0.75;
+  }
+  .saved {
+    color: #008300;
+    font-weight: 600;
   }
   .grid-2 {
     display: grid;

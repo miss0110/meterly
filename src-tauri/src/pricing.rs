@@ -85,6 +85,15 @@ pub fn price_for(model: &str) -> Option<(&'static str, &'static ModelPrice)> {
 
 /// Cost in USD for the four disjoint token slots of one event or bucket.
 /// Unknown model → `None` (UI "N/A").
+/// USD saved by cache reads vs paying the full input rate for the same
+/// tokens: `cache_read * (input rate - cache-read rate)`. `None` for unknown
+/// models; 0-savings models (rates equal) return Some(0.0).
+pub fn cache_savings_usd(model: &str, cache_read_tokens: u64) -> Option<f64> {
+    let (_, price) = price_for(model)?;
+    let per_tok = (price.input_per_mtok - price.cache_read_per_mtok).max(0.0) / 1_000_000.0;
+    Some(cache_read_tokens as f64 * per_tok)
+}
+
 pub fn cost_usd(
     model: &str,
     input_tokens: u64,

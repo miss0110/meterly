@@ -42,6 +42,8 @@ export interface SourceSummary {
   health: SourceHealth;
   today_tokens: TokenBreakdown;
   today_cost_usd: number | null;
+  /** USD saved today by cache reads vs full input rate (known models). */
+  today_cache_saved_usd: number | null;
   rate_limit: RateLimitStatus;
   /** Daily totals, oldest → today (7 entries) — sparklines. */
   last7_totals: number[];

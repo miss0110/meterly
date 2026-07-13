@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::aggregate::DailyBucket;
-use crate::model::UsageEvent;
+use crate::model::{RateLimitStatus, UsageEvent};
 use crate::sources::SourceCursors;
 
 pub const CACHE_VERSION: u32 = 1;
@@ -34,6 +34,10 @@ pub struct CacheV1 {
     /// Recent events (~6h) for the Claude rolling-window estimate.
     #[serde(default)]
     pub recent_events: Vec<UsageEvent>,
+    /// Last measured Codex rate-limit snapshot — shown right after app
+    /// restart until the next token_count event refreshes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_rate_limit: Option<RateLimitStatus>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on
