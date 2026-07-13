@@ -156,6 +156,16 @@ pub fn run() {
             // immediately, so the tray title fills in shortly after launch.
             scheduler::start(app.handle().clone());
 
+            // Debug/screenshot helper: METERLY_SHOW=dashboard,popover shows
+            // the named windows on launch (normally tray-only).
+            if let Ok(show) = std::env::var("METERLY_SHOW") {
+                for label in show.split(',') {
+                    if let Some(w) = app.get_webview_window(label.trim()) {
+                        let _ = w.show();
+                    }
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
