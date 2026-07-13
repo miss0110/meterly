@@ -68,12 +68,22 @@ export interface DashboardData {
   timezone_note: string;
 }
 
+export interface HeatmapCell {
+  /** 0 = 월 … 6 = 일 (로컬 tz). */
+  weekday: number;
+  hour: number;
+  total: number;
+}
+
 export type Range = "daily30" | "weekly12" | "monthly6";
 
 export const getSummary = () => invoke<Summary>("get_summary");
 export const getDashboard = (range: Range) =>
   invoke<DashboardData>("get_dashboard", { range });
 export const refreshNow = () => invoke<Summary | null>("refresh_now");
+export const getHeatmap = () => invoke<HeatmapCell[]>("get_heatmap");
+export const exportData = (range: Range, format: "csv" | "json") =>
+  invoke<string>("export_data", { range, format });
 export const openDashboard = () => invoke<void>("open_dashboard");
 
 export const onUsageUpdated = (

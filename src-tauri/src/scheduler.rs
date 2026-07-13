@@ -129,6 +129,12 @@ impl Engine {
                             &outcome.events,
                             window_start,
                         );
+                        self.cache.hourly_claude.clear();
+                        aggregate::ingest_hourly(
+                            &mut self.cache.hourly_claude,
+                            &outcome.events,
+                            window_start,
+                        );
                         let cutoff =
                             Utc::now() - chrono::Duration::hours(aggregate::RECENT_RETENTION_HOURS);
                         self.cache
@@ -150,9 +156,15 @@ impl Engine {
                         // once from scratch (always-correct recovery).
                         self.cache.codex_cursors = SourceCursors::default();
                         self.cache.daily_codex.clear();
+                        self.cache.hourly_codex.clear();
                         outcome = rt.source.scan(&SourceCursors::default());
                     }
                     aggregate::ingest(&mut self.cache.daily_codex, &outcome.events, window_start);
+                    aggregate::ingest_hourly(
+                        &mut self.cache.hourly_codex,
+                        &outcome.events,
+                        window_start,
+                    );
                     if let Some(cursors) = outcome.cursors {
                         self.cache.codex_cursors = cursors;
                     }
@@ -173,6 +185,8 @@ impl Engine {
         self.cache.recent_events.retain(|e| e.timestamp >= cutoff);
         aggregate::prune(&mut self.cache.daily_claude, window_start);
         aggregate::prune(&mut self.cache.daily_codex, window_start);
+        aggregate::prune_hourly(&mut self.cache.hourly_claude, window_start);
+        aggregate::prune_hourly(&mut self.cache.hourly_codex, window_start);
 
         // Persist the freshest measured Codex snapshot so a restarted app
         // shows limits immediately (until the next token_count refreshes).
@@ -341,6 +355,71 @@ impl Engine {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HeatmapCell {
+    /// 0 = 월요일 … 6 = 일요일 (local tz).
+    pub weekday: u8,
+    pub hour: u8,
+    pub total: u64,
+}
+
+impl Engine {
+    /// Weekday×hour token totals over the whole backfill window.
+    pub fn heatmap(&self) -> Vec<HeatmapCell> {
+        use chrono::Datelike;
+        let mut grid = [[0u64; 24]; 7];
+        for b in self.cache.hourly_claude.iter().chain(self.cache.hourly_codex.iter()) {
+            let wd = b.date.weekday().num_days_from_monday() as usize;
+            grid[wd][b.hour as usize] += b.total;
+        }
+        let mut cells = Vec::with_capacity(7 * 24);
+        for (wd, row) in grid.iter().enumerate() {
+            for (h, total) in row.iter().enumerate() {
+                cells.push(HeatmapCell {
+                    weekday: wd as u8,
+                    hour: h as u8,
+                    total: *total,
+                });
+            }
+        }
+        cells
+    }
+
+    /// Export the current range's aggregate rows to ~/Downloads.
+    /// Returns the written file path.
+    pub fn export(&self, range: &str, format: &str) -> Result<String, String> {
+        let data = self.dashboard(range);
+        let today = Local::now().format("%Y%m%d-%H%M%S");
+        let dir = dirs::download_dir().ok_or("다운로드 폴더를 찾을 수 없음")?;
+        let ext = if format == "csv" { "csv" } else { "json" };
+        let path = dir.join(format!("meterly-{range}-{today}.{ext}"));
+        let body = if format == "csv" {
+            let mut out = String::from(
+                "period,source,model,input,output,cache_read,cache_creation,total,cost_usd\n",
+            );
+            for r in &data.rows {
+                out.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{}\n",
+                    r.period,
+                    r.source.as_str(),
+                    r.model.as_deref().unwrap_or("unknown"),
+                    r.tokens.input,
+                    r.tokens.output,
+                    r.tokens.cache_read,
+                    r.tokens.cache_creation,
+                    r.tokens.total,
+                    r.cost_usd.map_or(String::from(""), |c| format!("{c:.4}")),
+                ));
+            }
+            out
+        } else {
+            serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+        };
+        std::fs::write(&path, body).map_err(|e| e.to_string())?;
+        Ok(path.display().to_string())
+    }
+}
+
 /// Limit thresholds that trigger a macOS notification (measured sources).
 const LIMIT_THRESHOLDS: [u8; 2] = [95, 80];
 
@@ -412,12 +491,45 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .body(body)
             .show();
     }
-    let today_total: u64 = summary.sources.iter().map(|s| s.today_tokens.total).sum();
+    let display = {
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.tray_display.clone().unwrap_or_default()
+    };
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let _ = tray.set_title(Some(format_tokens(today_total)));
+        let title = match display.as_str() {
+            "icon" => None,
+            "cost" => {
+                let cost: f64 = summary
+                    .sources
+                    .iter()
+                    .filter_map(|s| s.today_cost_usd)
+                    .sum();
+                Some(format!("${cost:.2}"))
+            }
+            _ => {
+                let total: u64 = summary.sources.iter().map(|s| s.today_tokens.total).sum();
+                Some(format_tokens(total))
+            }
+        };
+        let _ = tray.set_title(title);
     }
     let _ = app.emit("usage-updated", &summary);
     Some(summary)
+}
+
+/// Change the tray display mode ("tokens"|"cost"|"icon"), persist, refresh.
+pub fn set_tray_display(app: &AppHandle, mode: &str) {
+    {
+        let state = app.state::<AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.tray_display = Some(mode.to_string());
+        let path = engine.cache_path.clone();
+        let _ = cache::save(&path, &engine.cache);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = refresh_and_publish(&app);
+    });
 }
 
 /// Background polling loop (plain thread — scans are blocking file IO).

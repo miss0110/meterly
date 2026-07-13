@@ -7,7 +7,7 @@ pub mod scheduler;
 pub mod sources;
 
 use tauri::{
-    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
@@ -45,7 +45,9 @@ pub fn run() {
             commands::get_summary,
             commands::get_dashboard,
             commands::refresh_now,
-            commands::open_dashboard
+            commands::open_dashboard,
+            commands::get_heatmap,
+            commands::export_data
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.
@@ -59,15 +61,37 @@ pub fn run() {
                 CheckMenuItemBuilder::with_id("autostart", "로그인 시 자동 시작")
                     .checked(autostart_enabled)
                     .build(app)?;
+            // 트레이 표시 모드 (radio-style check items).
+            let saved_display = {
+                let state = app.state::<scheduler::AppState>();
+                let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+                engine.cache.tray_display.clone().unwrap_or_default()
+            };
+            let disp_tokens = CheckMenuItemBuilder::with_id("disp_tokens", "토큰 표시")
+                .checked(saved_display != "cost" && saved_display != "icon")
+                .build(app)?;
+            let disp_cost = CheckMenuItemBuilder::with_id("disp_cost", "비용 표시 (API 환산)")
+                .checked(saved_display == "cost")
+                .build(app)?;
+            let disp_icon = CheckMenuItemBuilder::with_id("disp_icon", "아이콘만")
+                .checked(saved_display == "icon")
+                .build(app)?;
+            let display_menu = SubmenuBuilder::new(app, "트레이 표시")
+                .item(&disp_tokens)
+                .item(&disp_cost)
+                .item(&disp_icon)
+                .build()?;
             let menu = MenuBuilder::new(app)
                 .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
                 .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
                 .separator()
+                .item(&display_menu)
                 .item(&autostart_item)
                 .separator()
                 .item(&MenuItemBuilder::with_id("quit", "meterly 종료").build(app)?)
                 .build()?;
             let autostart_check = autostart_item.clone();
+            let disp_items = (disp_tokens.clone(), disp_cost.clone(), disp_icon.clone());
 
             // Tray icon. The title shows today's total tokens after the
             // first refresh; "–" is the placeholder until then.
@@ -87,6 +111,17 @@ pub fn run() {
                         std::thread::spawn(move || {
                             let _ = scheduler::refresh_and_publish(&app);
                         });
+                    }
+                    id @ ("disp_tokens" | "disp_cost" | "disp_icon") => {
+                        let mode = match id {
+                            "disp_cost" => "cost",
+                            "disp_icon" => "icon",
+                            _ => "tokens",
+                        };
+                        let _ = disp_items.0.set_checked(mode == "tokens");
+                        let _ = disp_items.1.set_checked(mode == "cost");
+                        let _ = disp_items.2.set_checked(mode == "icon");
+                        scheduler::set_tray_display(app, mode);
                     }
                     "autostart" => {
                         let launcher = app.autolaunch();

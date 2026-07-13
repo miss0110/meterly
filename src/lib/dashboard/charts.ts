@@ -28,6 +28,8 @@ export interface Theme {
   categories: [string, string, string, string]; // input/output/cache_read/cache_creation
   modelSlots: string[]; // fixed categorical order (validated set)
   other: string;
+  /** Sequential blue ramp, near-zero → max (heatmap magnitude). */
+  seq: string[];
 }
 
 const LIGHT: Theme = {
@@ -41,6 +43,7 @@ const LIGHT: Theme = {
     "#4a3aa7", "#e34948", "#e87ba4", "#eb6834",
   ],
   other: "#8a8983",
+  seq: ["#e9f1fb", "#b7d3f6", "#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"],
 };
 
 const DARK: Theme = {
@@ -54,6 +57,7 @@ const DARK: Theme = {
     "#9085e9", "#e66767", "#d55181", "#d95926",
   ],
   other: "#8a8983",
+  seq: ["#22293a", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4"],
 };
 
 export function theme(): Theme {

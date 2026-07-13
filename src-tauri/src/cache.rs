@@ -10,11 +10,13 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::aggregate::DailyBucket;
+use crate::aggregate::{DailyBucket, HourlyBucket};
 use crate::model::{RateLimitStatus, UsageEvent};
 use crate::sources::SourceCursors;
 
-pub const CACHE_VERSION: u32 = 1;
+// v2: hourly buckets for the weekday×hour heatmap (+ tray display setting).
+// A version bump discards old caches → one full rebuild fills history.
+pub const CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CacheV1 {
@@ -38,6 +40,14 @@ pub struct CacheV1 {
     /// restart until the next token_count event refreshes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_rate_limit: Option<RateLimitStatus>,
+    /// Hourly buckets (v2) — heatmap. Same replace/additive split as daily.
+    #[serde(default)]
+    pub hourly_claude: Vec<HourlyBucket>,
+    #[serde(default)]
+    pub hourly_codex: Vec<HourlyBucket>,
+    /// Tray title mode: "tokens" (default) | "cost" | "icon".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tray_display: Option<String>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

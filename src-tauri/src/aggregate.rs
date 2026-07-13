@@ -45,6 +45,48 @@ impl DailyBucket {
     }
 }
 
+/// One (date, hour, source) bucket for the weekday×hour usage heatmap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HourlyBucket {
+    pub date: NaiveDate,
+    pub hour: u8,
+    pub source: SourceId,
+    pub total: u64,
+}
+
+/// Fold events into hourly totals (local tz), dropping pre-window events.
+pub fn ingest_hourly(
+    buckets: &mut Vec<HourlyBucket>,
+    events: &[crate::model::UsageEvent],
+    window_start: NaiveDate,
+) {
+    use chrono::Timelike;
+    for ev in events {
+        let local = ev.timestamp.with_timezone(&Local);
+        let date = local.date_naive();
+        if date < window_start {
+            continue;
+        }
+        let hour = local.hour() as u8;
+        match buckets
+            .iter_mut()
+            .find(|b| b.date == date && b.hour == hour && b.source == ev.source)
+        {
+            Some(b) => b.total += ev.total_tokens(),
+            None => buckets.push(HourlyBucket {
+                date,
+                hour,
+                source: ev.source,
+                total: ev.total_tokens(),
+            }),
+        }
+    }
+}
+
+pub fn prune_hourly(buckets: &mut Vec<HourlyBucket>, window_start: NaiveDate) {
+    buckets.retain(|b| b.date >= window_start);
+}
+
 /// `backfill_start = min(start of every supported dashboard range)` (V2-A3).
 /// Ranges: daily30 (today−29d), weekly12 (this week −11w), monthly6 (first
 /// of this month −5mo). monthly6 is always the earliest (~150d > 84d > 29d),

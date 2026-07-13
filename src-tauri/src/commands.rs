@@ -2,7 +2,7 @@
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::scheduler::{refresh_and_publish, AppState, DashboardData, Summary};
+use crate::scheduler::{refresh_and_publish, AppState, DashboardData, HeatmapCell, Summary};
 
 #[tauri::command]
 pub fn get_summary(state: State<'_, AppState>) -> Summary {
@@ -14,6 +14,24 @@ pub fn get_summary(state: State<'_, AppState>) -> Summary {
 pub fn get_dashboard(state: State<'_, AppState>, range: String) -> DashboardData {
     let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     engine.dashboard(&range)
+}
+
+#[tauri::command]
+pub fn get_heatmap(state: State<'_, AppState>) -> Vec<HeatmapCell> {
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.heatmap()
+}
+
+/// Export aggregate rows for a range to ~/Downloads (csv|json). Returns the
+/// written file path.
+#[tauri::command]
+pub fn export_data(
+    state: State<'_, AppState>,
+    range: String,
+    format: String,
+) -> Result<String, String> {
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.export(&range, &format)
 }
 
 /// Manual refresh (popover button). Blocking file IO — run off the main

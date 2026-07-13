@@ -3,8 +3,11 @@
   import {
     getDashboard,
     getSummary,
+    getHeatmap,
+    exportData,
     onUsageUpdated,
     type DashboardData,
+    type HeatmapCell,
     type Range,
     type Summary,
   } from "../ipc";
@@ -35,6 +38,8 @@
   let range = $state<Range>("daily30");
   let data = $state<DashboardData | null>(null);
   let summary = $state<Summary | null>(null);
+  let heatmap = $state<HeatmapCell[]>([]);
+  let exportMsg = $state<string | null>(null);
   let trendCanvas: HTMLCanvasElement;
   let compositionCanvas: HTMLCanvasElement;
   let costCanvas: HTMLCanvasElement;
@@ -48,6 +53,34 @@
     renderCompositionChart(compositionCanvas, data);
     renderCostChart(costCanvas, data);
     renderModelChart(modelCanvas, data);
+    heatmap = await getHeatmap();
+  }
+
+  const WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"];
+  const heatmapMax = $derived(Math.max(...heatmap.map((c) => c.total), 1));
+
+  function heatColor(total: number): string {
+    if (total === 0) return "transparent";
+    // sqrt scale: heavy-tail token counts would otherwise flatten the ramp.
+    const idx = Math.min(
+      t.seq.length - 1,
+      1 + Math.floor(Math.sqrt(total / heatmapMax) * (t.seq.length - 1)),
+    );
+    return t.seq[idx];
+  }
+
+  function cellAt(wd: number, hour: number): number {
+    return heatmap.find((c) => c.weekday === wd && c.hour === hour)?.total ?? 0;
+  }
+
+  async function doExport(format: "csv" | "json") {
+    try {
+      const path = await exportData(range, format);
+      exportMsg = `저장됨: ${path}`;
+    } catch (e) {
+      exportMsg = `내보내기 실패: ${e}`;
+    }
+    setTimeout(() => (exportMsg = null), 6000);
   }
 
   onMount(() => {
@@ -95,8 +128,14 @@
           {r.label}
         </button>
       {/each}
+      <span class="nav-sep"></span>
+      <button title="현재 범위 집계를 CSV로 저장" onclick={() => doExport("csv")}>CSV</button>
+      <button title="현재 범위 집계를 JSON으로 저장" onclick={() => doExport("json")}>JSON</button>
     </nav>
   </header>
+  {#if exportMsg}
+    <div class="toast">{exportMsg}</div>
+  {/if}
 
   {#if summary}
     <section class="cards">
@@ -151,6 +190,26 @@
     <div class="chart-block">
       <h2>모델별 비교 <span class="muted">(기간 합계)</span></h2>
       <div class="chart-wrap short"><canvas bind:this={modelCanvas}></canvas></div>
+    </div>
+  </section>
+
+  <section class="chart-block">
+    <h2>사용 패턴 히트맵 <span class="muted">(요일×시간, 전체 창 합계)</span></h2>
+    <div class="heatmap">
+      <div class="hm-corner"></div>
+      {#each Array(24) as _, h}
+        <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
+      {/each}
+      {#each WEEKDAYS as day, wd}
+        <div class="hm-day">{day}</div>
+        {#each Array(24) as _, h}
+          <div
+            class="hm-cell"
+            style={`background:${heatColor(cellAt(wd, h))}`}
+            title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
+          ></div>
+        {/each}
+      {/each}
     </div>
   </section>
 
@@ -294,5 +353,40 @@
   }
   footer {
     margin-top: auto;
+  }
+  .nav-sep {
+    width: 0.5rem;
+  }
+  .toast {
+    font-size: 0.75rem;
+    padding: 0.35rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    opacity: 0.85;
+    align-self: flex-start;
+  }
+  .heatmap {
+    display: grid;
+    grid-template-columns: 2rem repeat(24, 1fr);
+    gap: 2px;
+  }
+  .hm-corner {
+  }
+  .hm-hour {
+    font-size: 0.6rem;
+    opacity: 0.55;
+    text-align: center;
+  }
+  .hm-day {
+    font-size: 0.65rem;
+    opacity: 0.65;
+    display: flex;
+    align-items: center;
+  }
+  .hm-cell {
+    aspect-ratio: 1 / 1.4;
+    border-radius: 3px;
+    border: 1px solid rgba(128, 128, 128, 0.12);
+    min-width: 0;
   }
 </style>
