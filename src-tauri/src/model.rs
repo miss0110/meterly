@@ -59,6 +59,7 @@ impl UsageEvent {
 
 /// Per-source parse health surfaced to the UI (AC4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceHealth {
     Ok,
     Partial { skipped_lines: u64, note: String },
@@ -69,6 +70,7 @@ pub enum SourceHealth {
 /// label "추정"); `Measured` comes from Codex log `rate_limits` snapshots
 /// (UI label "로그 기준", `resets_at` converted from epoch seconds).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RateLimitStatus {
     Estimated {
         window_hours: u32,

@@ -130,6 +130,10 @@ impl UsageSource for ClaudeCodeSource {
         ScanOutcome {
             events,
             needs_rebuild: false,
+            // Full-parse source: events REPLACE claude aggregates each scan
+            // (54MB corpus — re-parse is cheap and self-healing), so no
+            // cursors and no persistent seen_keys are needed.
+            cursors: None,
         }
     }
 

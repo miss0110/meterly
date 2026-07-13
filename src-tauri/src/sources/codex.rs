@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::model::{RateLimitStatus, SourceHealth, SourceId, UsageEvent};
 
-use super::{RecentEvents, ScanOutcome, SourceCursors, UsageSource};
+use super::{CursorEntry, RecentEvents, ScanOutcome, SourceCursors, UsageSource};
 
 /// Registry constructor slot (AC7).
 pub fn make(root: PathBuf) -> Box<dyn UsageSource> {
@@ -140,119 +140,166 @@ impl CodexSource {
         }
     }
 
-    /// Parse one rollout file, appending events. Returns lines skipped.
-    fn parse_file(
+    /// Parse appended file content, appending events. State is seeded from
+    /// the cursor (T1 (a) baseline + turn_context model) so incremental
+    /// scans continue exactly where the previous one stopped. Returns
+    /// (skipped_lines, consumed_bytes, prev_total, model): an incomplete
+    /// trailing line (no '\n' yet — writer mid-line) is NOT consumed, so the
+    /// next scan re-reads it once complete (T6).
+    fn parse_content(
         &mut self,
         uuid: &str,
-        path: &Path,
+        content: &str,
+        seed_total: Option<u64>,
+        seed_model: Option<String>,
         events: &mut Vec<UsageEvent>,
-    ) -> std::io::Result<u64> {
-        let content = fs::read_to_string(path)?;
+    ) -> (u64, u64, Option<u64>, Option<String>) {
         let mut skipped: u64 = 0;
+        let mut consumed: u64 = 0;
         // T1 (a) rule state: previous cumulative total in THIS file.
-        let mut prev_total: Option<u64> = None;
+        let mut prev_total: Option<u64> = seed_total;
         // T1 (e): latest preceding turn_context model in THIS file.
-        let mut current_model: Option<String> = None;
+        let mut current_model: Option<String> = seed_model;
 
-        for line in content.lines() {
+        for chunk in content.split_inclusive('\n') {
+            let terminated = chunk.ends_with('\n');
+            let line = chunk.trim_end_matches(['\n', '\r']);
+            if !terminated {
+                // Unterminated tail. A writer-in-progress fragment fails to
+                // parse → defer (not consumed, not a skip) and re-read next
+                // scan. A complete record merely missing its newline parses
+                // fine → consume it now (otherwise it would double count
+                // when the newline arrives later).
+                if serde_json::from_str::<serde_json::Value>(line).is_ok() {
+                    consumed += chunk.len() as u64;
+                    self.process_line(
+                        uuid,
+                        line,
+                        &mut skipped,
+                        &mut prev_total,
+                        &mut current_model,
+                        events,
+                    );
+                }
+                break;
+            }
+            consumed += chunk.len() as u64;
             if line.trim().is_empty() {
                 continue;
             }
-            let record: RawRecord = match serde_json::from_str(line) {
-                Ok(r) => r,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
-            };
-            let payload = record.payload.as_ref();
-            match record.kind.as_deref() {
-                Some("turn_context") => {
-                    if let Some(model) = payload
-                        .and_then(|p| p.get("model"))
-                        .and_then(|m| m.as_str())
-                    {
-                        current_model = Some(model.to_string());
-                    }
-                }
-                Some("event_msg") => {
-                    let is_token_count = payload
-                        .and_then(|p| p.get("type"))
-                        .and_then(|t| t.as_str())
-                        == Some("token_count");
-                    if !is_token_count {
-                        continue; // other event_msg kinds are not ours
-                    }
-                    let payload = payload.expect("token_count implies payload");
-
-                    // rate_limits snapshot refresh (info may be null).
-                    if let Some(raw) = payload.get("rate_limits") {
-                        self.absorb_rate_limits(raw, record.timestamp.as_deref());
-                    }
-
-                    // info: null → snapshot-only record (97 measured), no event.
-                    let info: RawTokenInfo = match payload.get("info") {
-                        Some(v) if !v.is_null() => match serde_json::from_value(v.clone()) {
-                            Ok(i) => i,
-                            Err(_) => {
-                                skipped += 1;
-                                continue;
-                            }
-                        },
-                        _ => continue,
-                    };
-                    let cumulative = info
-                        .total_token_usage
-                        .and_then(|t| t.total_tokens);
-                    let Some(cumulative) = cumulative else {
-                        continue; // no cumulative marker — cannot apply (a) rule
-                    };
-
-                    // T1 (a): count only when the cumulative total CHANGED.
-                    // Unchanged = duplicate emission (skip silently, not an
-                    // error); decreased = reset, new baseline, keep counting.
-                    let counts = match prev_total {
-                        None => true,
-                        Some(p) => cumulative != p,
-                    };
-                    prev_total = Some(cumulative);
-                    if !counts {
-                        continue;
-                    }
-
-                    let last = info.last_token_usage.unwrap_or_default();
-                    // C2: subset violation discards the WHOLE record
-                    // (checked_sub — no clamp-to-zero, no panic).
-                    let Some(net_input) = last.input_tokens.checked_sub(last.cached_input_tokens)
-                    else {
-                        skipped += 1;
-                        continue;
-                    };
-                    let Some(timestamp) = record
-                        .timestamp
-                        .as_deref()
-                        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-                        .map(|t| t.with_timezone(&Utc))
-                    else {
-                        skipped += 1;
-                        continue;
-                    };
-                    events.push(UsageEvent {
-                        source: SourceId::Codex,
-                        session_id: uuid.to_string(),
-                        dedup_key: None, // Codex identity = uuid cursor, not key
-                        timestamp,
-                        model: current_model.clone(),
-                        input_tokens: net_input,
-                        output_tokens: last.output_tokens,
-                        cache_read_tokens: last.cached_input_tokens,
-                        cache_creation_tokens: 0,
-                    });
-                }
-                _ => {} // session_meta, response_item, legacy flat records, …
-            }
+            self.process_line(
+                uuid,
+                line,
+                &mut skipped,
+                &mut prev_total,
+                &mut current_model,
+                events,
+            );
         }
-        Ok(skipped)
+        (skipped, consumed, prev_total, current_model)
+    }
+
+    /// Handle one complete JSONL record line (T5 rules unchanged).
+    fn process_line(
+        &mut self,
+        uuid: &str,
+        line: &str,
+        skipped: &mut u64,
+        prev_total: &mut Option<u64>,
+        current_model: &mut Option<String>,
+        events: &mut Vec<UsageEvent>,
+    ) {
+        let record: RawRecord = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(_) => {
+                *skipped += 1;
+                return;
+            }
+        };
+        let payload = record.payload.as_ref();
+        match record.kind.as_deref() {
+            Some("turn_context") => {
+                if let Some(model) = payload
+                    .and_then(|p| p.get("model"))
+                    .and_then(|m| m.as_str())
+                {
+                    *current_model = Some(model.to_string());
+                }
+            }
+            Some("event_msg") => {
+                let is_token_count = payload
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("token_count");
+                if !is_token_count {
+                    return; // other event_msg kinds are not ours
+                }
+                let payload = payload.expect("token_count implies payload");
+
+                // rate_limits snapshot refresh (info may be null).
+                if let Some(raw) = payload.get("rate_limits") {
+                    self.absorb_rate_limits(raw, record.timestamp.as_deref());
+                }
+
+                // info: null → snapshot-only record (97 measured), no event.
+                let info: RawTokenInfo = match payload.get("info") {
+                    Some(v) if !v.is_null() => match serde_json::from_value(v.clone()) {
+                        Ok(i) => i,
+                        Err(_) => {
+                            *skipped += 1;
+                            return;
+                        }
+                    },
+                    _ => return,
+                };
+                let cumulative = info.total_token_usage.and_then(|t| t.total_tokens);
+                let Some(cumulative) = cumulative else {
+                    return; // no cumulative marker — cannot apply (a) rule
+                };
+
+                // T1 (a): count only when the cumulative total CHANGED.
+                // Unchanged = duplicate emission (skip silently, not an
+                // error); decreased = reset, new baseline, keep counting.
+                let counts = match *prev_total {
+                    None => true,
+                    Some(p) => cumulative != p,
+                };
+                *prev_total = Some(cumulative);
+                if !counts {
+                    return;
+                }
+
+                let last = info.last_token_usage.unwrap_or_default();
+                // C2: subset violation discards the WHOLE record
+                // (checked_sub — no clamp-to-zero, no panic).
+                let Some(net_input) = last.input_tokens.checked_sub(last.cached_input_tokens)
+                else {
+                    *skipped += 1;
+                    return;
+                };
+                let Some(timestamp) = record
+                    .timestamp
+                    .as_deref()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&Utc))
+                else {
+                    *skipped += 1;
+                    return;
+                };
+                events.push(UsageEvent {
+                    source: SourceId::Codex,
+                    session_id: uuid.to_string(),
+                    dedup_key: None, // Codex identity = uuid cursor, not key
+                    timestamp,
+                    model: current_model.clone(),
+                    input_tokens: net_input,
+                    output_tokens: last.output_tokens,
+                    cache_read_tokens: last.cached_input_tokens,
+                    cache_creation_tokens: 0,
+                });
+            }
+            _ => {} // session_meta, response_item, legacy flat records, …
+        }
     }
 
     /// Keep the newest rate_limits snapshot (record timestamps win; a
@@ -303,9 +350,9 @@ impl UsageSource for CodexSource {
         "Codex"
     }
 
-    fn scan(&mut self, _cursors: &SourceCursors) -> ScanOutcome {
-        // TODO(T6): honor cursors for incremental offsets. Full parse for now;
-        // uuid resolution and sessions-priority dedup are already final (C1).
+    fn scan(&mut self, cursors: &SourceCursors) -> ScanOutcome {
+        // Incremental scan (T6): cursors are uuid-keyed {offset,size,mtime}
+        // plus per-file parser state. Only appended bytes are re-read.
         let mut skipped_files: u64 = 0;
         let mut notes: Vec<String> = Vec::new();
 
@@ -339,14 +386,102 @@ impl UsageSource for CodexSource {
 
         let mut events: Vec<UsageEvent> = Vec::new();
         let mut skipped_lines: u64 = 0;
+        let mut needs_rebuild = false;
+        let mut new_cursors = SourceCursors::default();
+        let window_start = crate::aggregate::backfill_window_start_epoch();
+
         for (uuid, path) in &by_uuid {
-            match self.parse_file(uuid, path, &mut events) {
-                Ok(skipped) => skipped_lines += skipped,
+            let carry = |nc: &mut SourceCursors| {
+                if let Some(c) = cursors.0.get(uuid) {
+                    nc.0.insert(uuid.clone(), c.clone());
+                }
+            };
+            let meta = match fs::metadata(path) {
+                Ok(m) => m,
                 // A-3 (TOCTOU): listed-then-moved file is transient — no
-                // event, no cursor change, no error; retry next scan.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => notes.push(format!("{}: {}", path.display(), e)),
+                // event, cursor unchanged, no error; retry next scan.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    carry(&mut new_cursors);
+                    continue;
+                }
+                Err(e) => {
+                    notes.push(format!("{}: {}", path.display(), e));
+                    carry(&mut new_cursors);
+                    continue;
+                }
+            };
+            let size = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // Backfill-window prune: a file last written before the window
+            // start cannot contain in-window events (events precede mtime).
+            // Stat-only skip keeps the first backfill off the multi-GB tail;
+            // an existing cursor for a now-stale file is evicted.
+            if mtime < window_start {
+                continue;
             }
+
+            let prior = cursors.0.get(uuid);
+            let (start_offset, seed_total, seed_model) = match prior {
+                // Truncation/rewrite backstop: cursors are untrustworthy.
+                Some(c) if size < c.offset => {
+                    needs_rebuild = true;
+                    continue;
+                }
+                // Unchanged since last scan: stat-only, carry the cursor.
+                Some(c) if size == c.size && mtime == c.mtime_epoch => {
+                    new_cursors.0.insert(uuid.clone(), c.clone());
+                    continue;
+                }
+                Some(c) => (c.offset, c.prev_total, c.model.clone()),
+                None => (0u64, None, None),
+            };
+
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = match fs::File::open(path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    carry(&mut new_cursors); // A-3 transient
+                    continue;
+                }
+                Err(e) => {
+                    notes.push(format!("{}: {}", path.display(), e));
+                    carry(&mut new_cursors);
+                    continue;
+                }
+            };
+            let mut content = String::new();
+            let read = (|| -> std::io::Result<()> {
+                if start_offset > 0 {
+                    file.seek(SeekFrom::Start(start_offset))?;
+                }
+                file.read_to_string(&mut content)?;
+                Ok(())
+            })();
+            if let Err(e) = read {
+                notes.push(format!("{}: {}", path.display(), e));
+                carry(&mut new_cursors);
+                continue;
+            }
+
+            let (skipped, consumed, prev_total, model) =
+                self.parse_content(uuid, &content, seed_total, seed_model, &mut events);
+            skipped_lines += skipped;
+            new_cursors.0.insert(
+                uuid.clone(),
+                CursorEntry {
+                    offset: start_offset + consumed,
+                    size,
+                    mtime_epoch: mtime,
+                    prev_total,
+                    model,
+                },
+            );
         }
 
         let total_skipped = skipped_lines + skipped_files;
@@ -364,7 +499,8 @@ impl UsageSource for CodexSource {
         };
         ScanOutcome {
             events,
-            needs_rebuild: false,
+            needs_rebuild,
+            cursors: Some(new_cursors),
         }
     }
 
