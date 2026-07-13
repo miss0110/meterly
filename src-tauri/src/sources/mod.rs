@@ -5,6 +5,8 @@
 //! `SourceCursors`, `ScanOutcome` and `RecentEvents` are deliberately
 //! minimal; T5/T6 concretize their semantics.
 
+pub mod claude_code;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -48,14 +50,25 @@ pub trait UsageSource: Send {
     fn rate_limit(&self, recent: &RecentEvents) -> RateLimitStatus;
 }
 
-/// Registry entry: source metadata plus the resolved log root. The parser
-/// constructor slot is added when the first parser lands (T4/T5) — adding a
+/// Registry entry: source metadata plus the resolved log root — adding a
 /// source stays a one-line change here.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SourceEntry {
     pub id: SourceId,
     pub display_name: &'static str,
     pub root_path: PathBuf,
+    /// Parser constructor (AC7). `None` until the parser task lands.
+    pub make_source: Option<fn(PathBuf) -> Box<dyn UsageSource>>,
+}
+
+/// Manual impl: metadata fields only — fn-pointer addresses are not
+/// meaningful to compare (and `id` determines the constructor anyway).
+impl PartialEq for SourceEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.display_name == other.display_name
+            && self.root_path == other.root_path
+    }
 }
 
 /// All registered sources with their log roots resolved once.
@@ -69,11 +82,13 @@ pub fn registry() -> Vec<SourceEntry> {
             id: SourceId::ClaudeCode,
             display_name: "Claude Code",
             root_path: resolve_root("METERLY_CLAUDE_DIR", &[".claude", "projects"]),
+            make_source: Some(claude_code::make),
         },
         SourceEntry {
             id: SourceId::Codex,
             display_name: "Codex",
             root_path: resolve_root("METERLY_CODEX_DIR", &[".codex"]),
+            make_source: None, // T5
         },
         // New sources register here: one `SourceEntry` per parser file (AC7).
     ]
