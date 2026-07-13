@@ -6,6 +6,7 @@
 //! minimal; T5/T6 concretize their semantics.
 
 pub mod claude_code;
+pub mod codex;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -88,7 +89,7 @@ pub fn registry() -> Vec<SourceEntry> {
             id: SourceId::Codex,
             display_name: "Codex",
             root_path: resolve_root("METERLY_CODEX_DIR", &[".codex"]),
-            make_source: None, // T5
+            make_source: Some(codex::make),
         },
         // New sources register here: one `SourceEntry` per parser file (AC7).
     ]
