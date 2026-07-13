@@ -1,3 +1,7 @@
+pub mod model;
+pub mod pricing;
+pub mod sources;
+
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
