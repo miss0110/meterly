@@ -7,6 +7,7 @@ pub mod scheduler;
 pub mod sources;
 
 use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
@@ -45,12 +46,36 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Tray icon. The title will show today's total tokens later
-            // (T9); "–" is the placeholder until then.
+            // Tray context menu (right-click): 대시보드 / 새로고침 / 종료.
+            // Left-click keeps toggling the popover.
+            let menu = MenuBuilder::new(app)
+                .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
+                .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
+                .separator()
+                .item(&MenuItemBuilder::with_id("quit", "meterly 종료").build(app)?)
+                .build()?;
+
+            // Tray icon. The title shows today's total tokens after the
+            // first refresh; "–" is the placeholder until then.
             TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
                 .title("–")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "quit" => app.exit(0),
+                    "dashboard" => {
+                        let _ = commands::open_dashboard(app.clone());
+                    }
+                    "refresh" => {
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = scheduler::refresh_and_publish(&app);
+                        });
+                    }
+                    _ => {}
+                })
                 .on_tray_icon_event(|tray, event| {
                     // Feed tray events to the positioner plugin so
                     // Position::TrayCenter knows where the tray icon is.
