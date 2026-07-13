@@ -43,6 +43,8 @@ export interface SourceSummary {
   today_tokens: TokenBreakdown;
   today_cost_usd: number | null;
   rate_limit: RateLimitStatus;
+  /** Daily totals, oldest → today (7 entries) — sparklines. */
+  last7_totals: number[];
 }
 
 export interface Summary {

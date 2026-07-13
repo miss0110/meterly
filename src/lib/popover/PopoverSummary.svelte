@@ -18,7 +18,10 @@
     LABEL_COST_NA,
     LABEL_READ_ERROR,
   } from "../format";
+  import { theme } from "../dashboard/charts";
+  import Sparkline from "../Sparkline.svelte";
 
+  const t = theme();
   let summary = $state<Summary | null>(null);
   let refreshing = $state(false);
 
@@ -67,14 +70,22 @@
     <p class="muted center">불러오는 중…</p>
   {:else}
     {#each summary.sources as s (s.id)}
-      <section class="source">
+      <section class="source" style={`--accent:${t.sources[s.id] ?? "#8a8983"}`}>
         <div class="row top">
-          <span class="name">{s.display_name}</span>
+          <span class="name"><span class="dot"></span>{s.display_name}</span>
           {#if healthError(s)}
             <span class="warn" title={healthError(s)}
               >{LABEL_READ_ERROR} (포맷 미지원)</span
             >
           {:else}
+            <span class="spark">
+              <Sparkline
+                values={s.last7_totals}
+                color={t.sources[s.id] ?? "#8a8983"}
+                width={56}
+                height={18}
+              />
+            </span>
             <span class="tokens">{formatTokens(s.today_tokens.total)} tok</span>
           {/if}
         </div>
@@ -164,6 +175,21 @@
   }
   .name {
     font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 3px;
+    background: var(--accent, #8a8983);
+    display: inline-block;
+  }
+  .row.top .spark {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: flex-end;
   }
   .tokens {
     font-variant-numeric: tabular-nums;
