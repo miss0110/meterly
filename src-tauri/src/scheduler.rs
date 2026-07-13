@@ -53,6 +53,9 @@ pub struct SourceSummary {
     pub today_tokens: TokenBreakdown,
     pub today_cost_usd: Option<f64>,
     pub rate_limit: RateLimitStatus,
+    /// Daily totals for the last 7 days (oldest → today) — popover/card
+    /// sparklines.
+    pub last7_totals: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +205,17 @@ impl Engine {
                     }
                 }
                 tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
+                let last7_totals: Vec<u64> = (0..7)
+                    .rev()
+                    .map(|days_ago| {
+                        let d = today - chrono::Duration::days(days_ago);
+                        self.all_buckets()
+                            .into_iter()
+                            .filter(|b| b.source == rt.id && b.date == d)
+                            .map(|b| b.total())
+                            .sum()
+                    })
+                    .collect();
                 let rate_limit = match rt.id {
                     SourceId::ClaudeCode => {
                         aggregate::claude_window_estimate(&self.cache.recent_events, now)
@@ -217,6 +231,7 @@ impl Engine {
                     today_tokens: tk,
                     today_cost_usd: cost,
                     rate_limit,
+                    last7_totals,
                 }
             })
             .collect();
