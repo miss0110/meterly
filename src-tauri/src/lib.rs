@@ -65,6 +65,20 @@ fn spawn_update_check(handle: AppHandle) {
     });
 }
 
+/// Tray "meterly 정보" (About): show the app name, version and a one-line
+/// description in a native dialog — like a standard macOS About panel.
+fn show_about(app: &AppHandle) {
+    use tauri_plugin_dialog::DialogExt;
+    let version = app.package_info().version.to_string();
+    let body = format!(
+        "meterly v{version}\n\n로컬 AI CLI 사용량 추적 · Claude Code · Codex\ncom.meterly.app"
+    );
+    app.dialog()
+        .message(body)
+        .title("meterly 정보")
+        .show(|_| {});
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -75,6 +89,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(scheduler::AppState(std::sync::Mutex::new(
             scheduler::Engine::new(),
         )))
@@ -119,6 +134,8 @@ pub fn run() {
                 .item(&disp_icon)
                 .build()?;
             let menu = MenuBuilder::new(app)
+                .item(&MenuItemBuilder::with_id("about", "meterly 정보").build(app)?)
+                .separator()
                 .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
                 .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
                 .separator()
@@ -140,6 +157,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
+                    "about" => show_about(app),
                     "dashboard" => {
                         let _ = commands::open_dashboard(app.clone());
                     }
