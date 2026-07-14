@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - platform: macos-latest # arm64
-            args: ""
+            args: "--bundles app" # ship a sanitized .app zip, not a DMG (see below)
           - platform: windows-latest
             args: ""
     runs-on: ${{ matrix.platform }}
@@ -37,8 +37,9 @@ jobs:
 
       - run: npm ci
 
-      # On a v* tag: builds AND creates/updates the GitHub release with the
-      # bundles (.dmg / .msi / setup.exe). On workflow_dispatch: build only.
+      # macOS builds only the .app (args above); Windows builds .msi/.exe.
+      # On a v* tag tauri-action also creates the GitHub release; the reliable
+      # macOS deliverable is the sanitized zip from the artifacts (step below).
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,13 +49,29 @@ jobs:
           releaseDraft: false
           args: ${{ matrix.args }}
 
+      # The DMG's Finder styling stamps a com.apple.FinderInfo xattr onto the
+      # app after signing, which invalidates the (ad-hoc) signature and makes
+      # Apple Silicon refuse to launch it — even after "Open Anyway". A zip of
+      # the freshly re-signed .app avoids that path entirely. We strip all
+      # xattrs, re-sign ad-hoc, and zip with ditto so the seal stays valid.
+      # NOTE: never upload the raw .app via upload-artifact — it re-zips the
+      # bundle and breaks the signature again. Only the ditto zip is safe.
+      - name: Sanitize and zip macOS app (ad-hoc, no notarization)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          echo "app: $APP"
+          xattr -cr "$APP"
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ditto -c -k --keepParent "$APP" "meterly-macos-arm64.zip"
+
       - name: Upload bundles as workflow artifacts
         uses: actions/upload-artifact@v5
         with:
           name: meterly-${{ matrix.platform }}
           path: |
-            src-tauri/target/release/bundle/macos/*.app
-            src-tauri/target/release/bundle/dmg/*.dmg
+            meterly-macos-arm64.zip
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: ignore
