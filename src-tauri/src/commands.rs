@@ -98,7 +98,9 @@ pub fn set_autostart(app: AppHandle, enabled: bool) {
 }
 
 /// Native folder picker → persist as the sync folder. Returns the chosen path.
-#[tauri::command]
+/// `async` so it runs OFF the main thread — `blocking_pick_folder` blocks its
+/// caller and must not sit on the main thread (that deadlocks the panel).
+#[tauri::command(async)]
 pub fn pick_sync_folder(app: AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let path = app
