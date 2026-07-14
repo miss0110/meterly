@@ -29,38 +29,94 @@ fn toggle_popover(app: &AppHandle) {
     }
 }
 
-/// Check GitHub Releases for a newer version on launch; if found, download and
-/// install it in the background, then notify the user to restart. Non-fatal:
-/// any failure (offline, no update, bad signature) is logged and ignored.
-#[cfg(not(debug_assertions))]
-fn spawn_update_check(handle: AppHandle) {
+/// Check for updates and drive the user through it with dialogs. `manual` =
+/// triggered from the tray menu (show "up to date"/error results); when false
+/// (launch check) those quiet outcomes are silent — only an available update
+/// prompts. Runs on its own thread so the blocking dialogs and the async
+/// check/install don't touch the UI thread or the async executor.
+fn check_updates(handle: AppHandle, manual: bool) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     use tauri_plugin_updater::UpdaterExt;
-    tauri::async_runtime::spawn(async move {
+
+    std::thread::spawn(move || {
+        let current = handle.package_info().version.to_string();
         let updater = match handle.updater() {
             Ok(u) => u,
             Err(err) => {
-                eprintln!("meterly: updater unavailable: {err}");
+                if manual {
+                    handle
+                        .dialog()
+                        .message(format!("업데이트를 확인할 수 없습니다.\n{err}"))
+                        .title("meterly 업데이트")
+                        .blocking_show();
+                }
                 return;
             }
         };
-        match updater.check().await {
+
+        match tauri::async_runtime::block_on(updater.check()) {
             Ok(Some(update)) => {
-                let version = update.version.clone();
-                match update.download_and_install(|_, _| {}, || {}).await {
+                let new_version = update.version.clone();
+                let install = handle
+                    .dialog()
+                    .message(format!(
+                        "새 버전 v{new_version} 이(가) 있습니다. (현재 v{current})\n지금 설치할까요?"
+                    ))
+                    .title("meterly 업데이트")
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "지금 설치".into(),
+                        "나중에".into(),
+                    ))
+                    .blocking_show();
+                if !install {
+                    return;
+                }
+                match tauri::async_runtime::block_on(
+                    update.download_and_install(|_, _| {}, || {}),
+                ) {
                     Ok(()) => {
-                        use tauri_plugin_notification::NotificationExt;
-                        let _ = handle
-                            .notification()
-                            .builder()
-                            .title("meterly 업데이트 준비됨")
-                            .body(format!("v{version} 설치됨 — 앱을 재시작하면 적용됩니다."))
-                            .show();
+                        let restart = handle
+                            .dialog()
+                            .message(format!(
+                                "v{new_version} 설치 완료. 지금 재시작하여 적용할까요?"
+                            ))
+                            .title("meterly 업데이트")
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "재시작".into(),
+                                "나중에".into(),
+                            ))
+                            .blocking_show();
+                        if restart {
+                            handle.restart();
+                        }
                     }
-                    Err(err) => eprintln!("meterly: update install failed: {err}"),
+                    Err(err) => {
+                        handle
+                            .dialog()
+                            .message(format!("업데이트 설치에 실패했습니다.\n{err}"))
+                            .title("meterly 업데이트")
+                            .blocking_show();
+                    }
                 }
             }
-            Ok(None) => {}
-            Err(err) => eprintln!("meterly: update check failed: {err}"),
+            Ok(None) => {
+                if manual {
+                    handle
+                        .dialog()
+                        .message(format!("이미 최신 버전입니다. (v{current})"))
+                        .title("meterly 업데이트")
+                        .blocking_show();
+                }
+            }
+            Err(err) => {
+                if manual {
+                    handle
+                        .dialog()
+                        .message(format!("업데이트 확인에 실패했습니다.\n{err}"))
+                        .title("meterly 업데이트")
+                        .blocking_show();
+                }
+            }
         }
     });
 }
@@ -138,6 +194,7 @@ pub fn run() {
                 .separator()
                 .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
                 .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
+                .item(&MenuItemBuilder::with_id("check_updates", "업데이트 확인").build(app)?)
                 .separator()
                 .item(&display_menu)
                 .item(&autostart_item)
@@ -158,6 +215,7 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
                     "about" => show_about(app),
+                    "check_updates" => check_updates(app.clone(), true),
                     "dashboard" => {
                         let _ = commands::open_dashboard(app.clone());
                     }
@@ -211,10 +269,10 @@ pub fn run() {
             // immediately, so the tray title fills in shortly after launch.
             scheduler::start(app.handle().clone());
 
-            // Check for updates on launch (release builds only — dev builds
-            // have no signed artifacts to compare against).
+            // Quiet update check on launch (release only) — prompts the user
+            // only when a newer version exists; silent otherwise.
             #[cfg(not(debug_assertions))]
-            spawn_update_check(app.handle().clone());
+            check_updates(app.handle().clone(), false);
 
             // Debug/screenshot helper: METERLY_SHOW=dashboard,popover shows
             // the named windows on launch (normally tray-only).
