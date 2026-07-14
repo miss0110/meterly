@@ -95,6 +95,10 @@ pub enum RateLimitStatus {
         secondary_used_percent: Option<f64>,
         window_minutes: u64,
         resets_at: DateTime<Utc>,
+        /// Secondary (weekly) window reset — Codex logs carry its own
+        /// `resets_at`. Optional so older caches still deserialize.
+        #[serde(default)]
+        secondary_resets_at: Option<DateTime<Utc>>,
     },
     /// Real usage from `claude -p "/usage"`: an optional session line plus the
     /// weekly windows.
@@ -168,6 +172,7 @@ mod tests {
                 secondary_used_percent: Some(40.0),
                 window_minutes: 300,
                 resets_at: Utc.timestamp_opt(1_782_740_693, 0).unwrap(),
+                secondary_resets_at: Utc.timestamp_opt(1_783_000_000, 0).single(),
             },
             RateLimitStatus::Unavailable,
         ];

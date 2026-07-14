@@ -85,7 +85,11 @@
       { label: "세션", percent: m.primary_used_percent, reset: formatResetTime(m.resets_at) },
     ];
     if (m.secondary_used_percent !== null) {
-      rows.push({ label: "주간", percent: m.secondary_used_percent, reset: null });
+      rows.push({
+        label: "주간",
+        percent: m.secondary_used_percent,
+        reset: m.secondary_resets_at ? formatResetTime(m.secondary_resets_at) : null,
+      });
     }
     return { badge: LABEL_MEASURED, rows };
   }

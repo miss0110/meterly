@@ -25,6 +25,7 @@ export type RateLimitStatus =
         secondary_used_percent: number | null;
         window_minutes: number;
         resets_at: string;
+        secondary_resets_at: string | null;
       };
     }
   | {
