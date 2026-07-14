@@ -73,6 +73,113 @@ pub struct Summary {
     pub sources: Vec<SourceSummary>,
 }
 
+// ---- Multi-device aggregation payloads ----
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceSourceUsage {
+    pub id: SourceId,
+    pub display_name: String,
+    pub today_tokens: TokenBreakdown,
+    pub today_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceSummary {
+    pub device_id: String,
+    pub hostname: String,
+    pub updated_at: chrono::DateTime<Utc>,
+    /// True for the machine this app instance runs on.
+    pub is_current: bool,
+    pub sources: Vec<DeviceSourceUsage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DevicesData {
+    /// False when no sync folder is configured (only the current device shown).
+    pub sync_enabled: bool,
+    pub devices: Vec<DeviceSummary>,
+}
+
+/// Sum a source's tokens + cost for one day from any bucket iterator (local
+/// in-memory buckets or a synced device file). Cost is recomputed via pricing.
+fn day_usage<'a>(
+    buckets: impl Iterator<Item = &'a DailyBucket>,
+    source: SourceId,
+    date: chrono::NaiveDate,
+) -> (TokenBreakdown, Option<f64>) {
+    let mut tk = TokenBreakdown {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_creation: 0,
+        total: 0,
+    };
+    let mut cost: Option<f64> = None;
+    for b in buckets.filter(|b| b.source == source && b.date == date) {
+        tk.input += b.input;
+        tk.output += b.output;
+        tk.cache_read += b.cache_read;
+        tk.cache_creation += b.cache_creation;
+        if let Some(c) = b.cost_usd() {
+            *cost.get_or_insert(0.0) += c;
+        }
+    }
+    tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
+    (tk, cost)
+}
+
+/// Sum one device's daily buckets from `start` onward into a range total.
+fn device_range_usage(
+    daily: &[DailyBucket],
+    hostname: &str,
+    is_current: bool,
+    updated_at: chrono::DateTime<Utc>,
+    start: chrono::NaiveDate,
+) -> DeviceRangeUsage {
+    let mut tk = TokenBreakdown {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_creation: 0,
+        total: 0,
+    };
+    let mut cost: Option<f64> = None;
+    for b in daily.iter().filter(|b| b.date >= start) {
+        tk.input += b.input;
+        tk.output += b.output;
+        tk.cache_read += b.cache_read;
+        tk.cache_creation += b.cache_creation;
+        if let Some(c) = b.cost_usd() {
+            *cost.get_or_insert(0.0) += c;
+        }
+    }
+    tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
+    DeviceRangeUsage {
+        hostname: hostname.to_string(),
+        updated_at,
+        is_current,
+        tokens: tk,
+        cost_usd: cost,
+    }
+}
+
+/// Machine name — used BOTH as the device identity/file key and the display
+/// label. Keying by hostname (not a random id) means relaunching or
+/// reinstalling on the same machine reuses its file instead of orphaning the
+/// old one and double-counting.
+fn hostname() -> String {
+    #[cfg(target_os = "windows")]
+    let h = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(target_os = "windows"))]
+    let h = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok());
+    h.map(|s| s.trim().trim_end_matches(".local").to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardRow {
     pub period: String,
@@ -82,11 +189,24 @@ pub struct DashboardRow {
     pub cost_usd: Option<f64>,
 }
 
+/// Per-host token/cost total over the selected dashboard range (combined view).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceRangeUsage {
+    pub hostname: String,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub is_current: bool,
+    pub tokens: TokenBreakdown,
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardData {
     pub range: String,
     pub rows: Vec<DashboardRow>,
     pub timezone_note: String,
+    /// Per-host totals for the range — only populated in the combined ("all")
+    /// scope; empty for the local view.
+    pub devices: Vec<DeviceRangeUsage>,
 }
 
 impl Engine {
@@ -220,10 +340,88 @@ impl Engine {
             }
         }
 
+        // Multi-device: publish this device's buckets to the shared folder.
+        if let Some(dir) = self.cache.sync_dir.clone() {
+            let name = hostname();
+            let file = crate::devicesync::DeviceFile {
+                device_id: name.clone(),
+                hostname: name,
+                updated_at: Utc::now(),
+                daily: self.all_buckets().into_iter().cloned().collect(),
+            };
+            if let Err(err) = crate::devicesync::write(std::path::Path::new(&dir), &file) {
+                eprintln!("meterly: device usage write failed: {err}");
+            }
+        }
+
         if let Err(err) = cache::save(&self.cache_path, &self.cache) {
             eprintln!("meterly: cache save failed: {err}");
         }
         self.summary()
+    }
+
+    /// Per-device today usage for the combined view. The current device comes
+    /// from live in-memory buckets; others from their synced files (its own
+    /// file is skipped to avoid double counting). Rate-limit % is intentionally
+    /// absent here — it is account-global, not per-device.
+    pub fn get_devices(&self) -> DevicesData {
+        let today = Local::now().date_naive();
+        let current_id = hostname();
+        let mut devices = Vec::new();
+
+        let cur_sources = self
+            .runtimes
+            .iter()
+            .map(|rt| {
+                let (tk, cost) = day_usage(self.all_buckets().into_iter(), rt.id, today);
+                DeviceSourceUsage {
+                    id: rt.id,
+                    display_name: rt.display_name.to_string(),
+                    today_tokens: tk,
+                    today_cost_usd: cost,
+                }
+            })
+            .collect();
+        devices.push(DeviceSummary {
+            device_id: current_id.clone(),
+            hostname: hostname(),
+            updated_at: Utc::now(),
+            is_current: true,
+            sources: cur_sources,
+        });
+
+        if let Some(dir) = &self.cache.sync_dir {
+            for df in crate::devicesync::read_all(std::path::Path::new(dir)) {
+                if df.device_id == current_id {
+                    continue; // our own file — already covered by live buckets.
+                }
+                let sources = self
+                    .runtimes
+                    .iter()
+                    .map(|rt| {
+                        let (tk, cost) = day_usage(df.daily.iter(), rt.id, today);
+                        DeviceSourceUsage {
+                            id: rt.id,
+                            display_name: rt.display_name.to_string(),
+                            today_tokens: tk,
+                            today_cost_usd: cost,
+                        }
+                    })
+                    .collect();
+                devices.push(DeviceSummary {
+                    device_id: df.device_id,
+                    hostname: df.hostname,
+                    updated_at: df.updated_at,
+                    is_current: false,
+                    sources,
+                });
+            }
+        }
+
+        DevicesData {
+            sync_enabled: self.cache.sync_dir.is_some(),
+            devices,
+        }
     }
 
     /// Build the summary from current state (no rescan).
@@ -316,11 +514,51 @@ impl Engine {
         }
     }
 
-    pub fn dashboard(&self, range: &str) -> DashboardData {
+    pub fn dashboard(&self, range: &str, scope: &str) -> DashboardData {
         let today = Local::now().date_naive();
         let start = aggregate::range_start(range, today).unwrap_or(today);
+
+        // Buckets to aggregate: this device always; other devices' synced
+        // files too when scope == "all". Cloned into an owned list so local
+        // (refs) and remote (owned) can be merged uniformly.
+        let mut buckets: Vec<DailyBucket> = self.all_buckets().into_iter().cloned().collect();
+        let mut devices: Vec<DeviceRangeUsage> = Vec::new();
+        if scope == "all" {
+            let current_id = hostname();
+            devices.push(device_range_usage(&buckets, &current_id, true, Utc::now(), start));
+            if let Some(dir) = &self.cache.sync_dir {
+                for df in crate::devicesync::read_all(std::path::Path::new(dir)) {
+                    if df.device_id == current_id {
+                        continue; // our own file — local buckets already cover it.
+                    }
+                    devices.push(device_range_usage(
+                        &df.daily,
+                        &df.hostname,
+                        false,
+                        df.updated_at,
+                        start,
+                    ));
+                    buckets.extend(df.daily.iter().cloned());
+                }
+            }
+            devices.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total));
+        } else if scope != "local" && scope != hostname() {
+            // A specific other host: aggregate only that device's synced file.
+            buckets = self
+                .cache
+                .sync_dir
+                .as_ref()
+                .and_then(|dir| {
+                    crate::devicesync::read_all(std::path::Path::new(dir))
+                        .into_iter()
+                        .find(|df| df.device_id == scope)
+                        .map(|df| df.daily)
+                })
+                .unwrap_or_default();
+        }
+
         let mut rows: Vec<DashboardRow> = Vec::new();
-        for b in self.all_buckets() {
+        for b in &buckets {
             if b.date < start {
                 continue;
             }
@@ -364,6 +602,7 @@ impl Engine {
                 "'오늘' 경계는 시스템 로컬 타임존({}) 자정 기준 — UTC 기준 도구와 다를 수 있음",
                 Local::now().format("%Z")
             ),
+            devices,
         }
     }
 
@@ -409,7 +648,7 @@ impl Engine {
     /// Export the current range's aggregate rows to ~/Downloads.
     /// Returns the written file path.
     pub fn export(&self, range: &str, format: &str) -> Result<String, String> {
-        let data = self.dashboard(range);
+        let data = self.dashboard(range, "local");
         let today = Local::now().format("%Y%m%d-%H%M%S");
         let dir = dirs::download_dir().ok_or("다운로드 폴더를 찾을 수 없음")?;
         let ext = if format == "csv" { "csv" } else { "json" };
@@ -552,6 +791,22 @@ pub fn set_tray_display(app: &AppHandle, mode: &str) {
         let state = app.state::<AppState>();
         let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         engine.cache.tray_display = Some(mode.to_string());
+        let path = engine.cache_path.clone();
+        let _ = cache::save(&path, &engine.cache);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = refresh_and_publish(&app);
+    });
+}
+
+/// Set (or clear with `None`) the multi-device sync folder, persist, then
+/// refresh so this device's file is written and the combined view updates.
+pub fn set_sync_dir(app: &AppHandle, dir: Option<String>) {
+    {
+        let state = app.state::<AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.sync_dir = dir;
         let path = engine.cache_path.clone();
         let _ = cache::save(&path, &engine.cache);
     }

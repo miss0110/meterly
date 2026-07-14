@@ -1,17 +1,18 @@
 pub mod aggregate;
 pub mod cache;
 pub mod commands;
+pub mod devicesync;
 pub mod model;
 pub mod pricing;
 pub mod scheduler;
 pub mod sources;
 
 use tauri::{
-    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_positioner::{Position, WindowExt};
 
 /// Toggle the popover window: hide when visible, otherwise position it near
@@ -34,7 +35,7 @@ fn toggle_popover(app: &AppHandle) {
 /// (launch check) those quiet outcomes are silent — only an available update
 /// prompts. Runs on its own thread so the blocking dialogs and the async
 /// check/install don't touch the UI thread or the async executor.
-fn check_updates(handle: AppHandle, manual: bool) {
+pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
     use tauri_plugin_updater::UpdaterExt;
 
@@ -121,20 +122,6 @@ fn check_updates(handle: AppHandle, manual: bool) {
     });
 }
 
-/// Tray "meterly 정보" (About): show the app name, version and a one-line
-/// description in a native dialog — like a standard macOS About panel.
-fn show_about(app: &AppHandle) {
-    use tauri_plugin_dialog::DialogExt;
-    let version = app.package_info().version.to_string();
-    let body = format!(
-        "meterly v{version}\n\n로컬 AI CLI 사용량 추적 · Claude Code · Codex\ncom.meterly.app"
-    );
-    app.dialog()
-        .message(body)
-        .title("meterly 정보")
-        .show(|_| {});
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -155,54 +142,31 @@ pub fn run() {
             commands::refresh_now,
             commands::open_dashboard,
             commands::get_heatmap,
-            commands::export_data
+            commands::export_data,
+            commands::get_devices,
+            commands::get_settings,
+            commands::set_tray_display,
+            commands::set_autostart,
+            commands::pick_sync_folder,
+            commands::clear_sync_folder,
+            commands::check_for_updates,
+            commands::open_settings
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Tray context menu (right-click): 대시보드 / 새로고침 /
-            // 자동 시작 토글 / 종료. Left-click keeps toggling the popover.
-            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
-            let autostart_item =
-                CheckMenuItemBuilder::with_id("autostart", "로그인 시 자동 시작")
-                    .checked(autostart_enabled)
-                    .build(app)?;
-            // 트레이 표시 모드 (radio-style check items).
-            let saved_display = {
-                let state = app.state::<scheduler::AppState>();
-                let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-                engine.cache.tray_display.clone().unwrap_or_default()
-            };
-            let disp_tokens = CheckMenuItemBuilder::with_id("disp_tokens", "토큰 표시")
-                .checked(saved_display != "cost" && saved_display != "icon")
-                .build(app)?;
-            let disp_cost = CheckMenuItemBuilder::with_id("disp_cost", "비용 표시 (API 환산)")
-                .checked(saved_display == "cost")
-                .build(app)?;
-            let disp_icon = CheckMenuItemBuilder::with_id("disp_icon", "아이콘만")
-                .checked(saved_display == "icon")
-                .build(app)?;
-            let display_menu = SubmenuBuilder::new(app, "트레이 표시")
-                .item(&disp_tokens)
-                .item(&disp_cost)
-                .item(&disp_icon)
-                .build()?;
+            // Tray menu: 설정 / 대시보드 / 새로고침 / 종료. Detailed controls
+            // (display mode, autostart, sync folder, updates) live in the
+            // Settings window. Left-click keeps toggling the popover.
             let menu = MenuBuilder::new(app)
-                .item(&MenuItemBuilder::with_id("about", "meterly 정보").build(app)?)
-                .separator()
+                .item(&MenuItemBuilder::with_id("settings", "설정…").build(app)?)
                 .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
                 .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
-                .item(&MenuItemBuilder::with_id("check_updates", "업데이트 확인").build(app)?)
-                .separator()
-                .item(&display_menu)
-                .item(&autostart_item)
                 .separator()
                 .item(&MenuItemBuilder::with_id("quit", "meterly 종료").build(app)?)
                 .build()?;
-            let autostart_check = autostart_item.clone();
-            let disp_items = (disp_tokens.clone(), disp_cost.clone(), disp_icon.clone());
 
             // Tray icon. The title shows today's total tokens after the
             // first refresh; "–" is the placeholder until then.
@@ -212,10 +176,11 @@ pub fn run() {
                 .title("–")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
+                .on_menu_event(|app, event| match event.id().as_ref() {
                     "quit" => app.exit(0),
-                    "about" => show_about(app),
-                    "check_updates" => check_updates(app.clone(), true),
+                    "settings" => {
+                        let _ = commands::open_settings(app.clone());
+                    }
                     "dashboard" => {
                         let _ = commands::open_dashboard(app.clone());
                     }
@@ -224,29 +189,6 @@ pub fn run() {
                         std::thread::spawn(move || {
                             let _ = scheduler::refresh_and_publish(&app);
                         });
-                    }
-                    id @ ("disp_tokens" | "disp_cost" | "disp_icon") => {
-                        let mode = match id {
-                            "disp_cost" => "cost",
-                            "disp_icon" => "icon",
-                            _ => "tokens",
-                        };
-                        let _ = disp_items.0.set_checked(mode == "tokens");
-                        let _ = disp_items.1.set_checked(mode == "cost");
-                        let _ = disp_items.2.set_checked(mode == "icon");
-                        scheduler::set_tray_display(app, mode);
-                    }
-                    "autostart" => {
-                        let launcher = app.autolaunch();
-                        let now_enabled = launcher.is_enabled().unwrap_or(false);
-                        let result = if now_enabled {
-                            launcher.disable()
-                        } else {
-                            launcher.enable()
-                        };
-                        if result.is_ok() {
-                            let _ = autostart_check.set_checked(!now_enabled);
-                        }
                     }
                     _ => {}
                 })

@@ -68,6 +68,26 @@ export interface Summary {
   sources: SourceSummary[];
 }
 
+export interface DeviceSourceUsage {
+  id: SourceId;
+  display_name: string;
+  today_tokens: TokenBreakdown;
+  today_cost_usd: number | null;
+}
+
+export interface DeviceSummary {
+  device_id: string;
+  hostname: string;
+  updated_at: string;
+  is_current: boolean;
+  sources: DeviceSourceUsage[];
+}
+
+export interface DevicesData {
+  sync_enabled: boolean;
+  devices: DeviceSummary[];
+}
+
 export interface DashboardRow {
   period: string;
   source: SourceId;
@@ -76,10 +96,19 @@ export interface DashboardRow {
   cost_usd: number | null;
 }
 
+export interface DeviceRangeUsage {
+  hostname: string;
+  updated_at: string;
+  is_current: boolean;
+  tokens: TokenBreakdown;
+  cost_usd: number | null;
+}
+
 export interface DashboardData {
   range: string;
   rows: DashboardRow[];
   timezone_note: string;
+  devices: DeviceRangeUsage[];
 }
 
 export interface HeatmapCell {
@@ -92,8 +121,26 @@ export interface HeatmapCell {
 export type Range = "daily30" | "weekly12" | "monthly6";
 
 export const getSummary = () => invoke<Summary>("get_summary");
-export const getDashboard = (range: Range) =>
-  invoke<DashboardData>("get_dashboard", { range });
+export const getDevices = () => invoke<DevicesData>("get_devices");
+
+export interface SettingsData {
+  version: string;
+  tray_display: string; // "tokens" | "cost" | "icon"
+  autostart: boolean;
+  sync_dir: string | null;
+}
+export const getSettings = () => invoke<SettingsData>("get_settings");
+export const setTrayDisplay = (mode: string) =>
+  invoke<void>("set_tray_display", { mode });
+export const setAutostart = (enabled: boolean) =>
+  invoke<void>("set_autostart", { enabled });
+export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
+export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
+export const checkForUpdates = () => invoke<void>("check_for_updates");
+export const openSettings = () => invoke<void>("open_settings");
+// scope: "all" | "local" | a device_id (a specific host).
+export const getDashboard = (range: Range, scope = "local") =>
+  invoke<DashboardData>("get_dashboard", { range, scope });
 export const refreshNow = () => invoke<Summary | null>("refresh_now");
 export const getHeatmap = () => invoke<HeatmapCell[]>("get_heatmap");
 export const exportData = (range: Range, format: "csv" | "json") =>

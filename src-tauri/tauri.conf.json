@@ -16,7 +16,7 @@
         "url": "index.html?window=popover",
         "title": "meterly",
         "width": 360,
-        "height": 420,
+        "height": 600,
         "decorations": false,
         "resizable": false,
         "visible": false,
@@ -29,6 +29,15 @@
         "title": "meterly — dashboard",
         "width": 960,
         "height": 640,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "url": "index.html?window=settings",
+        "title": "meterly 설정",
+        "width": 460,
+        "height": 560,
+        "resizable": false,
         "visible": false
       }
     ],
