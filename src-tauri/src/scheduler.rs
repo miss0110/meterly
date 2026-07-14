@@ -128,6 +128,41 @@ fn day_usage<'a>(
     (tk, cost)
 }
 
+/// Sum one device's daily buckets from `start` onward into a range total.
+fn device_range_usage(
+    daily: &[DailyBucket],
+    hostname: &str,
+    is_current: bool,
+    updated_at: chrono::DateTime<Utc>,
+    start: chrono::NaiveDate,
+) -> DeviceRangeUsage {
+    let mut tk = TokenBreakdown {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_creation: 0,
+        total: 0,
+    };
+    let mut cost: Option<f64> = None;
+    for b in daily.iter().filter(|b| b.date >= start) {
+        tk.input += b.input;
+        tk.output += b.output;
+        tk.cache_read += b.cache_read;
+        tk.cache_creation += b.cache_creation;
+        if let Some(c) = b.cost_usd() {
+            *cost.get_or_insert(0.0) += c;
+        }
+    }
+    tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
+    DeviceRangeUsage {
+        hostname: hostname.to_string(),
+        updated_at,
+        is_current,
+        tokens: tk,
+        cost_usd: cost,
+    }
+}
+
 /// Machine name — used BOTH as the device identity/file key and the display
 /// label. Keying by hostname (not a random id) means relaunching or
 /// reinstalling on the same machine reuses its file instead of orphaning the
@@ -154,11 +189,24 @@ pub struct DashboardRow {
     pub cost_usd: Option<f64>,
 }
 
+/// Per-host token/cost total over the selected dashboard range (combined view).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceRangeUsage {
+    pub hostname: String,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub is_current: bool,
+    pub tokens: TokenBreakdown,
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardData {
     pub range: String,
     pub rows: Vec<DashboardRow>,
     pub timezone_note: String,
+    /// Per-host totals for the range — only populated in the combined ("all")
+    /// scope; empty for the local view.
+    pub devices: Vec<DeviceRangeUsage>,
 }
 
 impl Engine {
@@ -466,11 +514,38 @@ impl Engine {
         }
     }
 
-    pub fn dashboard(&self, range: &str) -> DashboardData {
+    pub fn dashboard(&self, range: &str, scope: &str) -> DashboardData {
         let today = Local::now().date_naive();
         let start = aggregate::range_start(range, today).unwrap_or(today);
+
+        // Buckets to aggregate: this device always; other devices' synced
+        // files too when scope == "all". Cloned into an owned list so local
+        // (refs) and remote (owned) can be merged uniformly.
+        let mut buckets: Vec<DailyBucket> = self.all_buckets().into_iter().cloned().collect();
+        let mut devices: Vec<DeviceRangeUsage> = Vec::new();
+        if scope == "all" {
+            let current_id = hostname();
+            devices.push(device_range_usage(&buckets, &current_id, true, Utc::now(), start));
+            if let Some(dir) = &self.cache.sync_dir {
+                for df in crate::devicesync::read_all(std::path::Path::new(dir)) {
+                    if df.device_id == current_id {
+                        continue; // our own file — local buckets already cover it.
+                    }
+                    devices.push(device_range_usage(
+                        &df.daily,
+                        &df.hostname,
+                        false,
+                        df.updated_at,
+                        start,
+                    ));
+                    buckets.extend(df.daily.iter().cloned());
+                }
+            }
+            devices.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total));
+        }
+
         let mut rows: Vec<DashboardRow> = Vec::new();
-        for b in self.all_buckets() {
+        for b in &buckets {
             if b.date < start {
                 continue;
             }
@@ -514,6 +589,7 @@ impl Engine {
                 "'오늘' 경계는 시스템 로컬 타임존({}) 자정 기준 — UTC 기준 도구와 다를 수 있음",
                 Local::now().format("%Z")
             ),
+            devices,
         }
     }
 
@@ -559,7 +635,7 @@ impl Engine {
     /// Export the current range's aggregate rows to ~/Downloads.
     /// Returns the written file path.
     pub fn export(&self, range: &str, format: &str) -> Result<String, String> {
-        let data = self.dashboard(range);
+        let data = self.dashboard(range, "local");
         let today = Local::now().format("%Y%m%d-%H%M%S");
         let dir = dirs::download_dir().ok_or("다운로드 폴더를 찾을 수 없음")?;
         let ext = if format == "csv" { "csv" } else { "json" };

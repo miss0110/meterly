@@ -21,9 +21,13 @@ pub fn get_devices(state: State<'_, AppState>) -> DevicesData {
 }
 
 #[tauri::command]
-pub fn get_dashboard(state: State<'_, AppState>, range: String) -> DashboardData {
+pub fn get_dashboard(
+    state: State<'_, AppState>,
+    range: String,
+    scope: Option<String>,
+) -> DashboardData {
     let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    engine.dashboard(&range)
+    engine.dashboard(&range, scope.as_deref().unwrap_or("local"))
 }
 
 #[tauri::command]

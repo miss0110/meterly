@@ -3,6 +3,7 @@
   import {
     getDashboard,
     getSummary,
+    getDevices,
     getHeatmap,
     exportData,
     onUsageUpdated,
@@ -36,6 +37,8 @@
   ];
 
   let range = $state<Range>("daily30");
+  let scope = $state<"local" | "all">("local");
+  let syncEnabled = $state(false);
   let data = $state<DashboardData | null>(null);
   let summary = $state<Summary | null>(null);
   let heatmap = $state<HeatmapCell[]>([]);
@@ -48,12 +51,23 @@
   const t = theme();
 
   async function load() {
-    data = await getDashboard(range);
+    data = await getDashboard(range, scope);
     renderTrendChart(trendCanvas, data);
     renderCompositionChart(compositionCanvas, data);
     renderCostChart(costCanvas, data);
     renderModelChart(modelCanvas, data);
     heatmap = await getHeatmap();
+  }
+
+  function selectScope(s: "local" | "all") {
+    scope = s;
+    load();
+  }
+  function freshness(iso: string): string {
+    const h = Math.floor((Date.now() - new Date(iso).getTime()) / 3_600_000);
+    if (h < 1) return "방금";
+    if (h < 24) return `${h}시간 전`;
+    return `${Math.floor(h / 24)}일 전`;
   }
 
   const WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"];
@@ -85,6 +99,9 @@
 
   onMount(() => {
     getSummary().then((s) => (summary = s));
+    getDevices()
+      .then((d) => (syncEnabled = d.sync_enabled))
+      .catch(() => {});
     load();
     const unlisten = onUsageUpdated((s) => {
       summary = s;
@@ -123,6 +140,11 @@
   <header>
     <h1>meterly</h1>
     <nav>
+      {#if syncEnabled}
+        <button class:active={scope === "local"} onclick={() => selectScope("local")}>이 기기</button>
+        <button class:active={scope === "all"} onclick={() => selectScope("all")}>전체</button>
+        <span class="nav-sep"></span>
+      {/if}
       {#each RANGES as r (r.key)}
         <button class:active={range === r.key} onclick={() => selectRange(r.key)}>
           {r.label}
@@ -171,6 +193,26 @@
     </section>
   {/if}
 
+  {#if scope === "all" && data && data.devices.length}
+    <section class="chart-block">
+      <h2>기기별 <span class="muted">(기간 합계)</span></h2>
+      <div class="devices">
+        {#each data.devices as d (d.hostname)}
+          <div class="dev-row">
+            <span class="dev-host">{d.hostname}{d.is_current ? " · 이 기기" : ""}</span>
+            <span class="dev-tok">{formatTokens(d.tokens.total)} tok</span>
+            <span class="dev-cost muted">
+              {d.cost_usd === null ? LABEL_COST_NA : formatCost(d.cost_usd)}
+            </span>
+            <span class="dev-when muted">
+              {d.is_current ? "실시간" : freshness(d.updated_at)}
+            </span>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
   <section class="grid-2">
     <div class="chart-block">
       <h2>도구별 추이 <span class="muted">(토큰)</span></h2>
@@ -194,7 +236,7 @@
   </section>
 
   <section class="chart-block">
-    <h2>사용 패턴 히트맵 <span class="muted">(요일×시간, 전체 창 합계)</span></h2>
+    <h2>사용 패턴 히트맵 <span class="muted">(요일×시간, 이 기기)</span></h2>
     <div class="heatmap">
       <div class="hm-corner"></div>
       {#each Array(24) as _, h}
@@ -364,6 +406,32 @@
     border: 1px solid rgba(128, 128, 128, 0.3);
     opacity: 0.85;
     align-self: flex-start;
+  }
+  .devices {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .dev-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 0.75rem;
+    align-items: baseline;
+    padding: 0.3rem 0.1rem;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+  }
+  .dev-host {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dev-tok {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .dev-cost,
+  .dev-when {
+    font-size: 0.75rem;
   }
   .heatmap {
     display: grid;
