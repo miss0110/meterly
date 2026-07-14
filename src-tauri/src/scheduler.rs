@@ -128,7 +128,10 @@ fn day_usage<'a>(
     (tk, cost)
 }
 
-/// Best-effort machine name (display label only; identity is the UUID).
+/// Machine name — used BOTH as the device identity/file key and the display
+/// label. Keying by hostname (not a random id) means relaunching or
+/// reinstalling on the same machine reuses its file instead of orphaning the
+/// old one and double-counting.
 fn hostname() -> String {
     #[cfg(target_os = "windows")]
     let h = std::env::var("COMPUTERNAME").ok();
@@ -136,9 +139,10 @@ fn hostname() -> String {
     let h = std::process::Command::new("hostname")
         .output()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string());
-    h.filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into())
+        .and_then(|o| String::from_utf8(o.stdout).ok());
+    h.map(|s| s.trim().trim_end_matches(".local").to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,10 +294,10 @@ impl Engine {
 
         // Multi-device: publish this device's buckets to the shared folder.
         if let Some(dir) = self.cache.sync_dir.clone() {
-            let device_id = self.ensure_device_id();
+            let name = hostname();
             let file = crate::devicesync::DeviceFile {
-                device_id,
-                hostname: hostname(),
+                device_id: name.clone(),
+                hostname: name,
                 updated_at: Utc::now(),
                 daily: self.all_buckets().into_iter().cloned().collect(),
             };
@@ -308,24 +312,13 @@ impl Engine {
         self.summary()
     }
 
-    /// Get-or-create the stable per-device id (persisted via the next cache
-    /// save). Never derived from hostname.
-    fn ensure_device_id(&mut self) -> String {
-        if let Some(id) = &self.cache.device_id {
-            return id.clone();
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        self.cache.device_id = Some(id.clone());
-        id
-    }
-
     /// Per-device today usage for the combined view. The current device comes
     /// from live in-memory buckets; others from their synced files (its own
     /// file is skipped to avoid double counting). Rate-limit % is intentionally
     /// absent here — it is account-global, not per-device.
     pub fn get_devices(&self) -> DevicesData {
         let today = Local::now().date_naive();
-        let current_id = self.cache.device_id.clone().unwrap_or_default();
+        let current_id = hostname();
         let mut devices = Vec::new();
 
         let cur_sources = self
