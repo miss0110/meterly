@@ -178,6 +178,7 @@
     </div>
   </header>
 
+  <div class="body">
   {#if summary === null}
     <p class="muted center">불러오는 중…</p>
   {:else}
@@ -276,6 +277,7 @@
       </section>
     {/if}
   {/if}
+  </div>
 
   <footer>
     <button class="primary" onclick={() => openDashboard()}>대시보드 열기</button>
@@ -295,6 +297,20 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex: 0 0 auto;
+  }
+  /* Scrolls when content (many cards / many devices) exceeds the window;
+     header and footer stay pinned so "대시보드 열기" is always reachable. */
+  .body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  footer {
+    flex: 0 0 auto;
   }
   .app-name {
     font-weight: 700;
