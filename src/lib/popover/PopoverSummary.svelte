@@ -53,8 +53,9 @@
   });
 
   const deviceCount = $derived(devices?.devices.length ?? 1);
-  // Only worth a toggle when there's more than this machine to combine.
-  const showToggle = $derived(deviceCount > 1);
+  // Show the toggle whenever a sync folder is configured — even with a single
+  // device (so "전체 1대" confirms sync is working before a 2nd joins).
+  const showToggle = $derived(devices?.sync_enabled ?? false);
 
   function combinedTokens(id: string): TokenBreakdown {
     const acc = { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 };
