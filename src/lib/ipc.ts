@@ -25,8 +25,22 @@ export type RateLimitStatus =
         secondary_used_percent: number | null;
         window_minutes: number;
         resets_at: string;
+        secondary_resets_at: string | null;
+      };
+    }
+  | {
+      cli: {
+        session_percent: number | null;
+        windows: UsageWindow[];
       };
     };
+
+/** One window from the real `claude -p "/usage"` readout. */
+export interface UsageWindow {
+  label: string;
+  used_percent: number;
+  resets_label: string | null;
+}
 
 export interface TokenBreakdown {
   input: number;

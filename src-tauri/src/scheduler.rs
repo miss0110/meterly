@@ -20,6 +20,10 @@ use crate::sources::{self, RecentEvents, SourceCursors, UsageSource};
 
 pub const REFRESH_INTERVAL_SECS: u64 = 180;
 
+/// Minimum gap between `claude -p "/usage"` shell-outs. The call spawns a
+/// process (~seconds), so it is throttled independently of the scan cycle.
+pub const CLAUDE_USAGE_MIN_INTERVAL_SECS: i64 = 120;
+
 pub struct AppState(pub Mutex<Engine>);
 
 pub struct Engine {
@@ -201,6 +205,21 @@ impl Engine {
             }
         }
 
+        // Real Claude /usage via the `claude` CLI — throttled (shell-out is
+        // ~seconds). Keep the last good reading on failure; only bump the
+        // timestamp so we retry no more than once per interval.
+        let due = self.cache.claude_cli_usage.as_ref().map_or(true, |(at, _)| {
+            (Utc::now() - *at).num_seconds() >= CLAUDE_USAGE_MIN_INTERVAL_SECS
+        });
+        if due {
+            let fetched = crate::sources::claude_usage::fetch();
+            if matches!(fetched, RateLimitStatus::Cli { .. }) {
+                self.cache.claude_cli_usage = Some((Utc::now(), fetched));
+            } else if let Some((at, _)) = self.cache.claude_cli_usage.as_mut() {
+                *at = Utc::now();
+            }
+        }
+
         if let Err(err) = cache::save(&self.cache_path, &self.cache) {
             eprintln!("meterly: cache save failed: {err}");
         }
@@ -258,9 +277,11 @@ impl Engine {
                     })
                     .collect();
                 let rate_limit = match rt.id {
-                    SourceId::ClaudeCode => {
-                        aggregate::claude_window_estimate(&self.cache.recent_events, now)
-                    }
+                    SourceId::ClaudeCode => match &self.cache.claude_cli_usage {
+                        // Real /usage readout when we have one; else estimate.
+                        Some((_, rl @ RateLimitStatus::Cli { .. })) => rl.clone(),
+                        _ => aggregate::claude_window_estimate(&self.cache.recent_events, now),
+                    },
                     SourceId::Codex => {
                         let live = rt
                             .source
@@ -540,10 +561,70 @@ pub fn set_tray_display(app: &AppHandle, mode: &str) {
     });
 }
 
-/// Background polling loop (plain thread — scans are blocking file IO).
+/// Background polling loop (plain thread — scans are blocking file IO) plus a
+/// filesystem watcher for near-instant refresh when logs change.
 pub fn start(app: AppHandle) {
+    let watch_app = app.clone();
+    std::thread::spawn(move || watch_loop(watch_app));
     std::thread::spawn(move || loop {
         let _ = refresh_and_publish(&app);
         std::thread::sleep(Duration::from_secs(REFRESH_INTERVAL_SECS));
     });
+}
+
+/// Watch the log roots (`~/.claude/projects`, `~/.codex`) and refresh once a
+/// burst of writes settles — debounced by a quiet gap, but bounded so a long
+/// streaming response still refreshes every few seconds. The 180s poll loop
+/// remains as a backstop (and covers dirs that don't exist yet).
+fn watch_loop(app: AppHandle) {
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+
+    let (tx, rx) = channel();
+    let mut watcher = match notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    }) {
+        Ok(w) => w,
+        Err(err) => {
+            eprintln!("meterly: file watcher unavailable ({err}); polling only");
+            return;
+        }
+    };
+
+    let mut watched = 0u32;
+    for entry in sources::registry() {
+        if watcher
+            .watch(&entry.root_path, RecursiveMode::Recursive)
+            .is_ok()
+        {
+            watched += 1;
+        }
+    }
+    if watched == 0 {
+        return; // nothing to watch yet — the poll loop still refreshes.
+    }
+
+    let quiet = Duration::from_millis(800);
+    let max = Duration::from_secs(5);
+    loop {
+        // Block until the first change of a burst.
+        if rx.recv().is_err() {
+            return; // watcher dropped.
+        }
+        // Coalesce: refresh after `quiet` idle, or `max` since the burst began.
+        let start = std::time::Instant::now();
+        loop {
+            let remaining = max.checked_sub(start.elapsed()).unwrap_or_default();
+            match rx.recv_timeout(quiet.min(remaining)) {
+                Ok(_) => {
+                    if start.elapsed() >= max {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        let _ = refresh_and_publish(&app);
+    }
 }

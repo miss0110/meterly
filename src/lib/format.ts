@@ -2,6 +2,7 @@
 
 export const LABEL_ESTIMATED = "추정";
 export const LABEL_MEASURED = "로그 기준";
+export const LABEL_CLI = "실시간";
 export const LABEL_COST = "API 환산";
 export const LABEL_COST_NA = "N/A";
 export const LABEL_READ_ERROR = "⚠ 읽기오류";

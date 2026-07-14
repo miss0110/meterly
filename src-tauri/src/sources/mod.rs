@@ -6,6 +6,7 @@
 //! minimal; T5/T6 concretize their semantics.
 
 pub mod claude_code;
+pub mod claude_usage;
 pub mod codex;
 
 use std::collections::BTreeMap;

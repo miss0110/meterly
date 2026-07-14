@@ -39,6 +39,8 @@ struct RateLimitSnapshot {
     secondary_used_percent: Option<f64>,
     window_minutes: u64,
     resets_at: DateTime<Utc>,
+    /// Secondary (weekly) window reset, when the snapshot carries one.
+    secondary_resets_at: Option<DateTime<Utc>>,
 }
 
 pub struct CodexSource {
@@ -330,12 +332,18 @@ impl CodexSource {
             (Some(_), None) => false,
         };
         if newer {
+            let secondary = parsed.secondary;
+            let secondary_resets_at = secondary
+                .as_ref()
+                .and_then(|s| s.resets_at)
+                .and_then(|r| Utc.timestamp_opt(r, 0).single());
             self.latest_rate_limits = Some(RateLimitSnapshot {
                 at,
                 primary_used_percent: used,
-                secondary_used_percent: parsed.secondary.and_then(|s| s.used_percent),
+                secondary_used_percent: secondary.and_then(|s| s.used_percent),
                 window_minutes: window,
                 resets_at,
+                secondary_resets_at,
             });
         }
     }
@@ -515,6 +523,7 @@ impl UsageSource for CodexSource {
                 secondary_used_percent: s.secondary_used_percent,
                 window_minutes: s.window_minutes,
                 resets_at: s.resets_at,
+                secondary_resets_at: s.secondary_resets_at,
             },
             None => RateLimitStatus::Unavailable,
         }
@@ -821,6 +830,7 @@ mod tests {
                 secondary_used_percent: Some(40.0),
                 window_minutes: 300,
                 resets_at: expected_resets,
+                secondary_resets_at: Utc.timestamp_opt(1_783_297_723, 0).single(),
             }
         );
         assert_eq!(source.health(), SourceHealth::Ok);
@@ -849,6 +859,7 @@ mod tests {
                 secondary_used_percent: Some(40.0),
                 window_minutes: 300,
                 resets_at: Utc.timestamp_opt(1_782_740_693, 0).unwrap(),
+                secondary_resets_at: Utc.timestamp_opt(1_783_297_723, 0).single(),
             }
         );
     }
