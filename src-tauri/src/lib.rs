@@ -29,6 +29,42 @@ fn toggle_popover(app: &AppHandle) {
     }
 }
 
+/// Check GitHub Releases for a newer version on launch; if found, download and
+/// install it in the background, then notify the user to restart. Non-fatal:
+/// any failure (offline, no update, bad signature) is logged and ignored.
+#[cfg(not(debug_assertions))]
+fn spawn_update_check(handle: AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    tauri::async_runtime::spawn(async move {
+        let updater = match handle.updater() {
+            Ok(u) => u,
+            Err(err) => {
+                eprintln!("meterly: updater unavailable: {err}");
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                match update.download_and_install(|_, _| {}, || {}).await {
+                    Ok(()) => {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = handle
+                            .notification()
+                            .builder()
+                            .title("meterly 업데이트 준비됨")
+                            .body(format!("v{version} 설치됨 — 앱을 재시작하면 적용됩니다."))
+                            .show();
+                    }
+                    Err(err) => eprintln!("meterly: update install failed: {err}"),
+                }
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("meterly: update check failed: {err}"),
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -38,6 +74,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(scheduler::AppState(std::sync::Mutex::new(
             scheduler::Engine::new(),
         )))
@@ -155,6 +192,11 @@ pub fn run() {
             // Background polling (default 3 min) — first refresh runs
             // immediately, so the tray title fills in shortly after launch.
             scheduler::start(app.handle().clone());
+
+            // Check for updates on launch (release builds only — dev builds
+            // have no signed artifacts to compare against).
+            #[cfg(not(debug_assertions))]
+            spawn_update_check(app.handle().clone());
 
             // Debug/screenshot helper: METERLY_SHOW=dashboard,popover shows
             // the named windows on launch (normally tray-only).
