@@ -2,12 +2,22 @@
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::scheduler::{refresh_and_publish, AppState, DashboardData, HeatmapCell, Summary};
+use crate::scheduler::{
+    refresh_and_publish, AppState, DashboardData, DevicesData, HeatmapCell, Summary,
+};
 
 #[tauri::command]
 pub fn get_summary(state: State<'_, AppState>) -> Summary {
     let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     engine.summary()
+}
+
+/// Per-device today usage for the combined ("전체 N대") view. Reads the sync
+/// folder; returns only the current device when sync is off.
+#[tauri::command]
+pub fn get_devices(state: State<'_, AppState>) -> DevicesData {
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.get_devices()
 }
 
 #[tauri::command]

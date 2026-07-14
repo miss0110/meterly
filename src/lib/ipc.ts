@@ -68,6 +68,26 @@ export interface Summary {
   sources: SourceSummary[];
 }
 
+export interface DeviceSourceUsage {
+  id: SourceId;
+  display_name: string;
+  today_tokens: TokenBreakdown;
+  today_cost_usd: number | null;
+}
+
+export interface DeviceSummary {
+  device_id: string;
+  hostname: string;
+  updated_at: string;
+  is_current: boolean;
+  sources: DeviceSourceUsage[];
+}
+
+export interface DevicesData {
+  sync_enabled: boolean;
+  devices: DeviceSummary[];
+}
+
 export interface DashboardRow {
   period: string;
   source: SourceId;
@@ -92,6 +112,7 @@ export interface HeatmapCell {
 export type Range = "daily30" | "weekly12" | "monthly6";
 
 export const getSummary = () => invoke<Summary>("get_summary");
+export const getDevices = () => invoke<DevicesData>("get_devices");
 export const getDashboard = (range: Range) =>
   invoke<DashboardData>("get_dashboard", { range });
 export const refreshNow = () => invoke<Summary | null>("refresh_now");

@@ -53,6 +53,14 @@ pub struct CacheV1 {
     /// back to the local estimate when absent/stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_cli_usage: Option<(chrono::DateTime<chrono::Utc>, RateLimitStatus)>,
+    /// Stable per-device id (UUID) for multi-device aggregation — generated
+    /// once, never derived from hostname (which can change or collide).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Folder (in a synced cloud drive) where this device writes its usage
+    /// file and reads the others'. `None` = multi-device sync off (local only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_dir: Option<String>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

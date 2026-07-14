@@ -2,12 +2,16 @@
   import { onMount } from "svelte";
   import {
     getSummary,
+    getDevices,
     refreshNow,
     openDashboard,
     onUsageUpdated,
     type Summary,
     type SourceSummary,
     type RateLimitStatus,
+    type DevicesData,
+    type DeviceSummary,
+    type TokenBreakdown,
   } from "../ipc";
   import {
     formatTokens,
@@ -26,15 +30,70 @@
 
   const t = theme();
   let summary = $state<Summary | null>(null);
+  let devices = $state<DevicesData | null>(null);
+  let mode = $state<"local" | "all">("local");
   let refreshing = $state(false);
+
+  function loadDevices() {
+    getDevices()
+      .then((d) => (devices = d))
+      .catch(() => {});
+  }
 
   onMount(() => {
     getSummary().then((s) => (summary = s));
-    const unlisten = onUsageUpdated((s) => (summary = s));
+    loadDevices();
+    const unlisten = onUsageUpdated((s) => {
+      summary = s;
+      loadDevices();
+    });
     return () => {
       unlisten.then((fn) => fn());
     };
   });
+
+  const deviceCount = $derived(devices?.devices.length ?? 1);
+  // Only worth a toggle when there's more than this machine to combine.
+  const showToggle = $derived(deviceCount > 1);
+
+  function combinedTokens(id: string): TokenBreakdown {
+    const acc = { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 };
+    for (const d of devices?.devices ?? []) {
+      const su = d.sources.find((x) => x.id === id);
+      if (!su) continue;
+      acc.input += su.today_tokens.input;
+      acc.output += su.today_tokens.output;
+      acc.cache_read += su.today_tokens.cache_read;
+      acc.cache_creation += su.today_tokens.cache_creation;
+      acc.total += su.today_tokens.total;
+    }
+    return acc;
+  }
+  function combinedCost(id: string): number | null {
+    let sum: number | null = null;
+    for (const d of devices?.devices ?? []) {
+      const c = d.sources.find((x) => x.id === id)?.today_cost_usd;
+      if (c != null) sum = (sum ?? 0) + c;
+    }
+    return sum;
+  }
+  // In "전체" mode show summed tokens/cost; cache-savings is local-only.
+  const combined = $derived(mode === "all" && devices !== null);
+  const shownTokens = (s: SourceSummary): TokenBreakdown =>
+    combined ? combinedTokens(s.id) : s.today_tokens;
+  const shownCost = (s: SourceSummary): number | null =>
+    combined ? combinedCost(s.id) : s.today_cost_usd;
+  const shownSaved = (s: SourceSummary): number | null =>
+    combined ? null : s.today_cache_saved_usd;
+
+  const deviceTotal = (d: DeviceSummary): number =>
+    d.sources.reduce((n, su) => n + su.today_tokens.total, 0);
+  function freshness(iso: string): string {
+    const h = Math.floor((Date.now() - new Date(iso).getTime()) / 3_600_000);
+    if (h < 1) return "방금";
+    if (h < 24) return `${h}시간 전`;
+    return `${Math.floor(h / 24)}일 전`;
+  }
 
   async function doRefresh() {
     refreshing = true;
@@ -105,9 +164,17 @@
 <div class="popover">
   <header>
     <span class="app-name">meterly</span>
-    <button class="ghost" onclick={doRefresh} disabled={refreshing}>
-      {refreshing ? "…" : "↻"}
-    </button>
+    <div class="head-right">
+      {#if showToggle}
+        <div class="seg">
+          <button class:on={mode === "local"} onclick={() => (mode = "local")}>이 기기</button>
+          <button class:on={mode === "all"} onclick={() => (mode = "all")}>전체 {deviceCount}대</button>
+        </div>
+      {/if}
+      <button class="ghost" onclick={doRefresh} disabled={refreshing}>
+        {refreshing ? "…" : "↻"}
+      </button>
+    </div>
   </header>
 
   {#if summary === null}
@@ -122,30 +189,35 @@
               >{LABEL_READ_ERROR} (포맷 미지원)</span
             >
           {:else}
-            <span class="spark">
-              <Sparkline
-                values={s.last7_totals}
-                color={t.sources[s.id] ?? "#8a8983"}
-                width={56}
-                height={18}
-              />
-            </span>
-            <span class="tokens">{formatTokens(s.today_tokens.total)} tok</span>
+            {#if !combined}
+              <span class="spark">
+                <Sparkline
+                  values={s.last7_totals}
+                  color={t.sources[s.id] ?? "#8a8983"}
+                  width={56}
+                  height={18}
+                />
+              </span>
+            {/if}
+            <span class="tokens">{formatTokens(shownTokens(s).total)} tok</span>
           {/if}
         </div>
         {#if !healthError(s)}
+          {@const tk = shownTokens(s)}
+          {@const cost = shownCost(s)}
+          {@const saved = shownSaved(s)}
           <div class="row detail">
             <span class="muted">
-              in {formatTokens(s.today_tokens.input)} · out
-              {formatTokens(s.today_tokens.output)} · cache
-              {formatTokens(s.today_tokens.cache_read + s.today_tokens.cache_creation)}
+              in {formatTokens(tk.input)} · out
+              {formatTokens(tk.output)} · cache
+              {formatTokens(tk.cache_read + tk.cache_creation)}
             </span>
             <span class="cost" title="구독 요금이 아닌 API 정가 환산값">
               {LABEL_COST}
-              {s.today_cost_usd === null ? LABEL_COST_NA : formatCost(s.today_cost_usd)}
-              {#if s.today_cache_saved_usd !== null && s.today_cache_saved_usd >= 0.01}
+              {cost === null ? LABEL_COST_NA : formatCost(cost)}
+              {#if saved !== null && saved >= 0.01}
                 <span class="saved" title="캐시 읽기를 정가 입력으로 환산했을 때 대비 절약액">
-                  캐시로 {formatCost(s.today_cache_saved_usd)} 절약
+                  캐시로 {formatCost(saved)} 절약
                 </span>
               {/if}
             </span>
@@ -187,6 +259,21 @@
         {/if}
       </section>
     {/each}
+
+    {#if combined && devices}
+      <section class="devices">
+        <div class="dev-title muted">기기별 (오늘)</div>
+        {#each devices.devices as d (d.device_id)}
+          <div class="dev-row">
+            <span class="dev-host">{d.hostname}{d.is_current ? " · 이 기기" : ""}</span>
+            <span class="dev-tok">{formatTokens(deviceTotal(d))} tok</span>
+            <span class="muted small dev-when">
+              {d.is_current ? "실시간" : freshness(d.updated_at)}
+            </span>
+          </div>
+        {/each}
+      </section>
+    {/if}
   {/if}
 
   <footer>
@@ -211,6 +298,59 @@
   .app-name {
     font-weight: 700;
     letter-spacing: 0.02em;
+  }
+  .head-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .seg {
+    display: inline-flex;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    border-radius: 7px;
+    overflow: hidden;
+  }
+  .seg button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 11.5px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .seg button.on {
+    background: var(--accent, #4f8ef7);
+    color: #fff;
+  }
+  .devices {
+    border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+    border-radius: 10px;
+    padding: 0.5rem 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .dev-title {
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  .dev-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .dev-host {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dev-tok {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .dev-when {
+    flex: 0 0 auto;
   }
   .source {
     border: 1px solid var(--border, rgba(128, 128, 128, 0.25));

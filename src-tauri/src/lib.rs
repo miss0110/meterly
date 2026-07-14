@@ -1,6 +1,7 @@
 pub mod aggregate;
 pub mod cache;
 pub mod commands;
+pub mod devicesync;
 pub mod model;
 pub mod pricing;
 pub mod scheduler;
@@ -135,6 +136,18 @@ fn show_about(app: &AppHandle) {
         .show(|_| {});
 }
 
+/// Tray "동기화 폴더 지정…": pick a folder in a synced cloud drive (iCloud /
+/// Google Drive / Dropbox / OneDrive) where devices exchange usage files.
+fn pick_sync_folder(app: &AppHandle) {
+    use tauri_plugin_dialog::DialogExt;
+    let handle = app.clone();
+    app.dialog().file().pick_folder(move |folder| {
+        if let Some(path) = folder.and_then(|f| f.into_path().ok()) {
+            scheduler::set_sync_dir(&handle, Some(path.to_string_lossy().to_string()));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -155,7 +168,8 @@ pub fn run() {
             commands::refresh_now,
             commands::open_dashboard,
             commands::get_heatmap,
-            commands::export_data
+            commands::export_data,
+            commands::get_devices
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.
@@ -195,6 +209,7 @@ pub fn run() {
                 .item(&MenuItemBuilder::with_id("dashboard", "대시보드 열기").build(app)?)
                 .item(&MenuItemBuilder::with_id("refresh", "지금 새로고침").build(app)?)
                 .item(&MenuItemBuilder::with_id("check_updates", "업데이트 확인").build(app)?)
+                .item(&MenuItemBuilder::with_id("set_sync", "동기화 폴더 지정…").build(app)?)
                 .separator()
                 .item(&display_menu)
                 .item(&autostart_item)
@@ -216,6 +231,7 @@ pub fn run() {
                     "quit" => app.exit(0),
                     "about" => show_about(app),
                     "check_updates" => check_updates(app.clone(), true),
+                    "set_sync" => pick_sync_folder(app),
                     "dashboard" => {
                         let _ = commands::open_dashboard(app.clone());
                     }

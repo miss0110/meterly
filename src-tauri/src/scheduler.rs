@@ -73,6 +73,74 @@ pub struct Summary {
     pub sources: Vec<SourceSummary>,
 }
 
+// ---- Multi-device aggregation payloads ----
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceSourceUsage {
+    pub id: SourceId,
+    pub display_name: String,
+    pub today_tokens: TokenBreakdown,
+    pub today_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceSummary {
+    pub device_id: String,
+    pub hostname: String,
+    pub updated_at: chrono::DateTime<Utc>,
+    /// True for the machine this app instance runs on.
+    pub is_current: bool,
+    pub sources: Vec<DeviceSourceUsage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DevicesData {
+    /// False when no sync folder is configured (only the current device shown).
+    pub sync_enabled: bool,
+    pub devices: Vec<DeviceSummary>,
+}
+
+/// Sum a source's tokens + cost for one day from any bucket iterator (local
+/// in-memory buckets or a synced device file). Cost is recomputed via pricing.
+fn day_usage<'a>(
+    buckets: impl Iterator<Item = &'a DailyBucket>,
+    source: SourceId,
+    date: chrono::NaiveDate,
+) -> (TokenBreakdown, Option<f64>) {
+    let mut tk = TokenBreakdown {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_creation: 0,
+        total: 0,
+    };
+    let mut cost: Option<f64> = None;
+    for b in buckets.filter(|b| b.source == source && b.date == date) {
+        tk.input += b.input;
+        tk.output += b.output;
+        tk.cache_read += b.cache_read;
+        tk.cache_creation += b.cache_creation;
+        if let Some(c) = b.cost_usd() {
+            *cost.get_or_insert(0.0) += c;
+        }
+    }
+    tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
+    (tk, cost)
+}
+
+/// Best-effort machine name (display label only; identity is the UUID).
+fn hostname() -> String {
+    #[cfg(target_os = "windows")]
+    let h = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(target_os = "windows"))]
+    let h = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string());
+    h.filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".into())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardRow {
     pub period: String,
@@ -220,10 +288,99 @@ impl Engine {
             }
         }
 
+        // Multi-device: publish this device's buckets to the shared folder.
+        if let Some(dir) = self.cache.sync_dir.clone() {
+            let device_id = self.ensure_device_id();
+            let file = crate::devicesync::DeviceFile {
+                device_id,
+                hostname: hostname(),
+                updated_at: Utc::now(),
+                daily: self.all_buckets().into_iter().cloned().collect(),
+            };
+            if let Err(err) = crate::devicesync::write(std::path::Path::new(&dir), &file) {
+                eprintln!("meterly: device usage write failed: {err}");
+            }
+        }
+
         if let Err(err) = cache::save(&self.cache_path, &self.cache) {
             eprintln!("meterly: cache save failed: {err}");
         }
         self.summary()
+    }
+
+    /// Get-or-create the stable per-device id (persisted via the next cache
+    /// save). Never derived from hostname.
+    fn ensure_device_id(&mut self) -> String {
+        if let Some(id) = &self.cache.device_id {
+            return id.clone();
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.cache.device_id = Some(id.clone());
+        id
+    }
+
+    /// Per-device today usage for the combined view. The current device comes
+    /// from live in-memory buckets; others from their synced files (its own
+    /// file is skipped to avoid double counting). Rate-limit % is intentionally
+    /// absent here — it is account-global, not per-device.
+    pub fn get_devices(&self) -> DevicesData {
+        let today = Local::now().date_naive();
+        let current_id = self.cache.device_id.clone().unwrap_or_default();
+        let mut devices = Vec::new();
+
+        let cur_sources = self
+            .runtimes
+            .iter()
+            .map(|rt| {
+                let (tk, cost) = day_usage(self.all_buckets().into_iter(), rt.id, today);
+                DeviceSourceUsage {
+                    id: rt.id,
+                    display_name: rt.display_name.to_string(),
+                    today_tokens: tk,
+                    today_cost_usd: cost,
+                }
+            })
+            .collect();
+        devices.push(DeviceSummary {
+            device_id: current_id.clone(),
+            hostname: hostname(),
+            updated_at: Utc::now(),
+            is_current: true,
+            sources: cur_sources,
+        });
+
+        if let Some(dir) = &self.cache.sync_dir {
+            for df in crate::devicesync::read_all(std::path::Path::new(dir)) {
+                if df.device_id == current_id {
+                    continue; // our own file — already covered by live buckets.
+                }
+                let sources = self
+                    .runtimes
+                    .iter()
+                    .map(|rt| {
+                        let (tk, cost) = day_usage(df.daily.iter(), rt.id, today);
+                        DeviceSourceUsage {
+                            id: rt.id,
+                            display_name: rt.display_name.to_string(),
+                            today_tokens: tk,
+                            today_cost_usd: cost,
+                        }
+                    })
+                    .collect();
+                devices.push(DeviceSummary {
+                    device_id: df.device_id,
+                    hostname: df.hostname,
+                    updated_at: df.updated_at,
+                    is_current: false,
+                    sources,
+                });
+            }
+        }
+
+        DevicesData {
+            sync_enabled: self.cache.sync_dir.is_some(),
+            devices,
+        }
     }
 
     /// Build the summary from current state (no rescan).
@@ -552,6 +709,22 @@ pub fn set_tray_display(app: &AppHandle, mode: &str) {
         let state = app.state::<AppState>();
         let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         engine.cache.tray_display = Some(mode.to_string());
+        let path = engine.cache_path.clone();
+        let _ = cache::save(&path, &engine.cache);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = refresh_and_publish(&app);
+    });
+}
+
+/// Set (or clear with `None`) the multi-device sync folder, persist, then
+/// refresh so this device's file is written and the combined view updates.
+pub fn set_sync_dir(app: &AppHandle, dir: Option<String>) {
+    {
+        let state = app.state::<AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.sync_dir = dir;
         let path = engine.cache_path.clone();
         let _ = cache::save(&path, &engine.cache);
     }
