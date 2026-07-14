@@ -7,6 +7,7 @@
     onUsageUpdated,
     type Summary,
     type SourceSummary,
+    type RateLimitStatus,
   } from "../ipc";
   import {
     formatTokens,
@@ -56,6 +57,37 @@
       return `${s.health.partial.skipped_lines}줄 건너뜀`;
     }
     return null;
+  }
+
+  type UsageRow = { label: string; percent: number; reset: string | null };
+  /** Normalize both the real `/usage` (cli) and Codex log (measured) readouts
+   *  into one shape so both render as identical session/weekly bar rows. */
+  function usageView(
+    rl: RateLimitStatus,
+  ): { badge: string; rows: UsageRow[] } | null {
+    if (rl === "unavailable" || "estimated" in rl) return null;
+    if ("cli" in rl) {
+      const rows: UsageRow[] = [];
+      if (rl.cli.session_percent !== null) {
+        rows.push({ label: "세션", percent: rl.cli.session_percent, reset: null });
+      }
+      for (const w of rl.cli.windows) {
+        rows.push({
+          label: w.label === "all models" ? "주간" : `주간·${w.label}`,
+          percent: w.used_percent,
+          reset: w.resets_label,
+        });
+      }
+      return { badge: LABEL_CLI, rows };
+    }
+    const m = rl.measured;
+    const rows: UsageRow[] = [
+      { label: "세션", percent: m.primary_used_percent, reset: formatResetTime(m.resets_at) },
+    ];
+    if (m.secondary_used_percent !== null) {
+      rows.push({ label: "주간", percent: m.secondary_used_percent, reset: null });
+    }
+    return { badge: LABEL_MEASURED, rows };
   }
 </script>
 
@@ -117,50 +149,25 @@
                 {formatTokens(s.rate_limit.estimated.window_tokens)} tok ·
                 리셋 {formatResetTime(s.rate_limit.estimated.resets_at)}
               </span>
-            {:else if "measured" in s.rate_limit}
-              <span class="muted">
-                <b class="badge">{LABEL_MEASURED}</b>
-                {s.rate_limit.measured.primary_used_percent.toFixed(0)}% 사용
-                {#if s.rate_limit.measured.secondary_used_percent !== null}
-                  (보조 {s.rate_limit.measured.secondary_used_percent.toFixed(0)}%)
-                {/if}
-                · 리셋 {formatResetTime(s.rate_limit.measured.resets_at)}
-              </span>
-              <span class="meter">
-                <span
-                  class="fill"
-                  style={`width:${Math.min(100, s.rate_limit.measured.primary_used_percent)}%`}
-                ></span>
-              </span>
-            {:else if "cli" in s.rate_limit}
-              <div class="cli-usage">
-                <span class="muted"><b class="badge">{LABEL_CLI}</b></span>
-                {#if s.rate_limit.cli.session_percent !== null}
-                  {@const p = s.rate_limit.cli.session_percent}
-                  <div class="uwin" class:warn={p >= 70} class:crit={p >= 90}>
-                    <span class="uwin-label">세션</span>
-                    <span class="meter">
-                      <span class="fill" style={`width:${Math.min(100, p)}%`}></span>
-                    </span>
-                    <span class="uwin-pct">{p.toFixed(0)}%</span>
-                  </div>
-                {/if}
-                {#each s.rate_limit.cli.windows as w}
-                  {@const p = w.used_percent}
-                  <div class="uwin" class:warn={p >= 70} class:crit={p >= 90}>
-                    <span class="uwin-label" title={w.label}>
-                      {w.label === "all models" ? "주간" : `주간·${w.label}`}
-                    </span>
-                    <span class="meter">
-                      <span class="fill" style={`width:${Math.min(100, p)}%`}></span>
-                    </span>
-                    <span class="uwin-pct">{p.toFixed(0)}%</span>
-                    {#if w.resets_label}
-                      <span class="muted small reset">리셋 {w.resets_label}</span>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
+            {:else}
+              {@const uv = usageView(s.rate_limit)}
+              {#if uv}
+                <div class="usage">
+                  <span class="muted"><b class="badge">{uv.badge}</b></span>
+                  {#each uv.rows as r}
+                    <div class="uwin" class:warn={r.percent >= 70} class:crit={r.percent >= 90}>
+                      <span class="uwin-label" title={r.label}>{r.label}</span>
+                      <span class="meter">
+                        <span class="fill" style={`width:${Math.min(100, r.percent)}%`}></span>
+                      </span>
+                      <span class="uwin-pct">{r.percent.toFixed(0)}%</span>
+                      {#if r.reset}
+                        <span class="muted small reset">리셋 {r.reset}</span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             {/if}
           </div>
           {#if healthNote(s)}
@@ -278,16 +285,18 @@
     height: 100%;
     background: #4f8ef7;
   }
-  .cli-usage {
+  .usage {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 10px;
     width: 100%;
+    margin-top: 2px;
   }
   .uwin {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    row-gap: 3px;
     flex-wrap: wrap;
   }
   .uwin .meter {
