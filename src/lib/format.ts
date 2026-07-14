@@ -21,5 +21,18 @@ export function formatCost(usd: number | null | undefined): string {
 
 export function formatResetTime(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // A weekly reset can be days out — show the date unless it's today.
+  if (d.toDateString() === now.toDateString()) return time;
+  return `${d.toLocaleDateString([], { month: "numeric", day: "numeric" })} ${time}`;
+}
+
+/** Label a rate-limit window by its length (Codex reports `window_minutes`;
+ *  300 = 5h session, 10080 = 7d weekly). */
+export function windowLabel(minutes: number): string {
+  if (minutes === 300) return "세션";
+  if (minutes === 10080) return "주간";
+  if (minutes < 1440) return `${Math.round(minutes / 60)}시간`;
+  return `${Math.round(minutes / 1440)}일`;
 }
