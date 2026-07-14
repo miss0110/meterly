@@ -542,6 +542,19 @@ impl Engine {
                 }
             }
             devices.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total));
+        } else if scope != "local" && scope != hostname() {
+            // A specific other host: aggregate only that device's synced file.
+            buckets = self
+                .cache
+                .sync_dir
+                .as_ref()
+                .and_then(|dir| {
+                    crate::devicesync::read_all(std::path::Path::new(dir))
+                        .into_iter()
+                        .find(|df| df.device_id == scope)
+                        .map(|df| df.daily)
+                })
+                .unwrap_or_default();
         }
 
         let mut rows: Vec<DashboardRow> = Vec::new();

@@ -31,7 +31,8 @@
   const t = theme();
   let summary = $state<Summary | null>(null);
   let devices = $state<DevicesData | null>(null);
-  let mode = $state<"local" | "all">("local");
+  // "all" | "__local" (this machine) | a device_id (a specific host).
+  let view = $state<string>("__local");
   let refreshing = $state(false);
 
   function loadDevices() {
@@ -53,9 +54,12 @@
   });
 
   const deviceCount = $derived(devices?.devices.length ?? 1);
-  // Show the toggle whenever a sync folder is configured — even with a single
-  // device (so "전체 1대" confirms sync is working before a 2nd joins).
+  // Show the scope dropdown whenever a sync folder is configured.
   const showToggle = $derived(devices?.sync_enabled ?? false);
+  // Other hosts (this machine is the "이 기기" option, not listed twice).
+  const otherDevices = $derived(devices?.devices.filter((d) => !d.is_current) ?? []);
+
+  const EMPTY_TK: TokenBreakdown = { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 };
 
   function combinedTokens(id: string): TokenBreakdown {
     const acc = { input: 0, output: 0, cache_read: 0, cache_creation: 0, total: 0 };
@@ -78,14 +82,23 @@
     }
     return sum;
   }
-  // In "전체" mode show summed tokens/cost; cache-savings is local-only.
-  const combined = $derived(mode === "all" && devices !== null);
+  const deviceById = (id: string) => devices?.devices.find((d) => d.device_id === id);
+  const deviceTokens = (dev: string, src: string): TokenBreakdown =>
+    deviceById(dev)?.sources.find((x) => x.id === src)?.today_tokens ?? EMPTY_TK;
+  const deviceCost = (dev: string, src: string): number | null =>
+    deviceById(dev)?.sources.find((x) => x.id === src)?.today_cost_usd ?? null;
+
+  // "__local" / sync-off → this machine's live summary; "all" → summed;
+  // else the selected host. Only "all" adds the per-device breakdown, and
+  // cache-savings/sparkline stay local (this machine) only.
+  const combined = $derived(view === "all");
+  const isLocalView = $derived(!showToggle || view === "__local");
   const shownTokens = (s: SourceSummary): TokenBreakdown =>
-    combined ? combinedTokens(s.id) : s.today_tokens;
+    isLocalView ? s.today_tokens : view === "all" ? combinedTokens(s.id) : deviceTokens(view, s.id);
   const shownCost = (s: SourceSummary): number | null =>
-    combined ? combinedCost(s.id) : s.today_cost_usd;
+    isLocalView ? s.today_cost_usd : view === "all" ? combinedCost(s.id) : deviceCost(view, s.id);
   const shownSaved = (s: SourceSummary): number | null =>
-    combined ? null : s.today_cache_saved_usd;
+    isLocalView ? s.today_cache_saved_usd : null;
 
   const deviceTotal = (d: DeviceSummary): number =>
     d.sources.reduce((n, su) => n + su.today_tokens.total, 0);
@@ -167,10 +180,13 @@
     <span class="app-name">meterly</span>
     <div class="head-right">
       {#if showToggle}
-        <div class="seg">
-          <button class:on={mode === "local"} onclick={() => (mode = "local")}>이 기기</button>
-          <button class:on={mode === "all"} onclick={() => (mode = "all")}>전체 {deviceCount}대</button>
-        </div>
+        <select class="scope" bind:value={view} aria-label="기기 선택">
+          <option value="all">전체 {deviceCount}대</option>
+          <option value="__local">이 기기</option>
+          {#each otherDevices as d (d.device_id)}
+            <option value={d.device_id}>{d.hostname}</option>
+          {/each}
+        </select>
       {/if}
       <button class="ghost" onclick={doRefresh} disabled={refreshing}>
         {refreshing ? "…" : "↻"}
@@ -191,7 +207,7 @@
               >{LABEL_READ_ERROR} (포맷 미지원)</span
             >
           {:else}
-            {#if !combined}
+            {#if isLocalView}
               <span class="spark">
                 <Sparkline
                   values={s.last7_totals}
@@ -321,23 +337,16 @@
     align-items: center;
     gap: 8px;
   }
-  .seg {
-    display: inline-flex;
-    border: 1px solid rgba(128, 128, 128, 0.35);
-    border-radius: 7px;
-    overflow: hidden;
-  }
-  .seg button {
-    border: 0;
-    background: transparent;
-    color: inherit;
+  .scope {
+    font: inherit;
     font-size: 11.5px;
-    padding: 3px 8px;
+    padding: 2px 6px;
+    border-radius: 7px;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    background: rgba(128, 128, 128, 0.12);
+    color: inherit;
+    max-width: 150px;
     cursor: pointer;
-  }
-  .seg button.on {
-    background: var(--accent, #4f8ef7);
-    color: #fff;
   }
   .devices {
     border: 1px solid var(--border, rgba(128, 128, 128, 0.25));

@@ -138,7 +138,8 @@ export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
 export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
 export const checkForUpdates = () => invoke<void>("check_for_updates");
 export const openSettings = () => invoke<void>("open_settings");
-export const getDashboard = (range: Range, scope: "local" | "all" = "local") =>
+// scope: "all" | "local" | a device_id (a specific host).
+export const getDashboard = (range: Range, scope = "local") =>
   invoke<DashboardData>("get_dashboard", { range, scope });
 export const refreshNow = () => invoke<Summary | null>("refresh_now");
 export const getHeatmap = () => invoke<HeatmapCell[]>("get_heatmap");

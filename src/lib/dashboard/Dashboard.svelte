@@ -37,8 +37,10 @@
   ];
 
   let range = $state<Range>("daily30");
-  let scope = $state<"local" | "all">("local");
+  // "all" | "local" (this machine) | a device_id (a specific host).
+  let scope = $state<string>("local");
   let syncEnabled = $state(false);
+  let otherHosts = $state<{ id: string; hostname: string }[]>([]);
   let data = $state<DashboardData | null>(null);
   let summary = $state<Summary | null>(null);
   let heatmap = $state<HeatmapCell[]>([]);
@@ -59,7 +61,7 @@
     heatmap = await getHeatmap();
   }
 
-  function selectScope(s: "local" | "all") {
+  function selectScope(s: string) {
     scope = s;
     load();
   }
@@ -100,7 +102,12 @@
   onMount(() => {
     getSummary().then((s) => (summary = s));
     getDevices()
-      .then((d) => (syncEnabled = d.sync_enabled))
+      .then((d) => {
+        syncEnabled = d.sync_enabled;
+        otherHosts = d.devices
+          .filter((x) => !x.is_current)
+          .map((x) => ({ id: x.device_id, hostname: x.hostname }));
+      })
       .catch(() => {});
     load();
     const unlisten = onUsageUpdated((s) => {
@@ -141,8 +148,17 @@
     <h1>meterly</h1>
     <nav>
       {#if syncEnabled}
-        <button class:active={scope === "local"} onclick={() => selectScope("local")}>이 기기</button>
-        <button class:active={scope === "all"} onclick={() => selectScope("all")}>전체</button>
+        <select
+          class="scope-select"
+          value={scope}
+          onchange={(e) => selectScope((e.currentTarget as HTMLSelectElement).value)}
+        >
+          <option value="all">전체</option>
+          <option value="local">이 기기</option>
+          {#each otherHosts as h (h.id)}
+            <option value={h.id}>{h.hostname}</option>
+          {/each}
+        </select>
         <span class="nav-sep"></span>
       {/if}
       {#each RANGES as r (r.key)}
@@ -301,6 +317,17 @@
     background: #4f8ef7;
     border-color: #4f8ef7;
     color: white;
+  }
+  .scope-select {
+    font: inherit;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.5rem;
+    border-radius: 6px;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    background: rgba(128, 128, 128, 0.12);
+    color: inherit;
+    cursor: pointer;
+    max-width: 180px;
   }
   .cards {
     display: grid;
