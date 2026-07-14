@@ -61,3 +61,73 @@ pub fn open_dashboard(app: AppHandle) -> Result<(), String> {
     dashboard.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// ---- Settings window ----
+
+#[derive(serde::Serialize)]
+pub struct SettingsData {
+    version: String,
+    tray_display: String,
+    autostart: bool,
+    sync_dir: Option<String>,
+}
+
+/// Current values for the settings window.
+#[tauri::command]
+pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData {
+    use tauri_plugin_autostart::ManagerExt;
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    SettingsData {
+        version: app.package_info().version.to_string(),
+        tray_display: engine.cache.tray_display.clone().unwrap_or_default(),
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        sync_dir: engine.cache.sync_dir.clone(),
+    }
+}
+
+#[tauri::command]
+pub fn set_tray_display(app: AppHandle, mode: String) {
+    crate::scheduler::set_tray_display(&app, &mode);
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    let _ = if enabled { mgr.enable() } else { mgr.disable() };
+}
+
+/// Native folder picker → persist as the sync folder. Returns the chosen path.
+#[tauri::command]
+pub fn pick_sync_folder(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|f| f.into_path().ok())?;
+    let s = path.to_string_lossy().to_string();
+    crate::scheduler::set_sync_dir(&app, Some(s.clone()));
+    Some(s)
+}
+
+#[tauri::command]
+pub fn clear_sync_folder(app: AppHandle) {
+    crate::scheduler::set_sync_dir(&app, None);
+}
+
+#[tauri::command]
+pub fn check_for_updates(app: AppHandle) {
+    crate::check_updates(app, true);
+}
+
+/// Show the settings window (tray "설정" / Cmd+,).
+#[tauri::command]
+pub fn open_settings(app: AppHandle) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("settings") else {
+        return Err("settings window not found".into());
+    };
+    w.show().map_err(|e| e.to_string())?;
+    w.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}

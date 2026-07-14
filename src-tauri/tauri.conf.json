@@ -30,6 +30,15 @@
         "width": 960,
         "height": 640,
         "visible": false
+      },
+      {
+        "label": "settings",
+        "url": "index.html?window=settings",
+        "title": "meterly 설정",
+        "width": 460,
+        "height": 560,
+        "resizable": false,
+        "visible": false
       }
     ],
     "security": {

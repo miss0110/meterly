@@ -113,6 +113,22 @@ export type Range = "daily30" | "weekly12" | "monthly6";
 
 export const getSummary = () => invoke<Summary>("get_summary");
 export const getDevices = () => invoke<DevicesData>("get_devices");
+
+export interface SettingsData {
+  version: string;
+  tray_display: string; // "tokens" | "cost" | "icon"
+  autostart: boolean;
+  sync_dir: string | null;
+}
+export const getSettings = () => invoke<SettingsData>("get_settings");
+export const setTrayDisplay = (mode: string) =>
+  invoke<void>("set_tray_display", { mode });
+export const setAutostart = (enabled: boolean) =>
+  invoke<void>("set_autostart", { enabled });
+export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
+export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
+export const checkForUpdates = () => invoke<void>("check_for_updates");
+export const openSettings = () => invoke<void>("open_settings");
 export const getDashboard = (range: Range) =>
   invoke<DashboardData>("get_dashboard", { range });
 export const refreshNow = () => invoke<Summary | null>("refresh_now");
