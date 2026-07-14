@@ -48,6 +48,11 @@ pub struct CacheV1 {
     /// Tray title mode: "tokens" (default) | "cost" | "icon".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tray_display: Option<String>,
+    /// Last real Claude `/usage` readout (via the `claude` CLI) with the time
+    /// it was fetched — throttles the shell-out and survives restarts. Falls
+    /// back to the local estimate when absent/stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_cli_usage: Option<(chrono::DateTime<chrono::Utc>, RateLimitStatus)>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

@@ -14,6 +14,7 @@
     formatResetTime,
     LABEL_ESTIMATED,
     LABEL_MEASURED,
+    LABEL_CLI,
     LABEL_COST,
     LABEL_COST_NA,
     LABEL_READ_ERROR,
@@ -131,6 +132,35 @@
                   style={`width:${Math.min(100, s.rate_limit.measured.primary_used_percent)}%`}
                 ></span>
               </span>
+            {:else if "cli" in s.rate_limit}
+              <div class="cli-usage">
+                <span class="muted"><b class="badge">{LABEL_CLI}</b></span>
+                {#if s.rate_limit.cli.session_percent !== null}
+                  {@const p = s.rate_limit.cli.session_percent}
+                  <div class="uwin" class:warn={p >= 70} class:crit={p >= 90}>
+                    <span class="uwin-label">세션</span>
+                    <span class="meter">
+                      <span class="fill" style={`width:${Math.min(100, p)}%`}></span>
+                    </span>
+                    <span class="uwin-pct">{p.toFixed(0)}%</span>
+                  </div>
+                {/if}
+                {#each s.rate_limit.cli.windows as w}
+                  {@const p = w.used_percent}
+                  <div class="uwin" class:warn={p >= 70} class:crit={p >= 90}>
+                    <span class="uwin-label" title={w.label}>
+                      {w.label === "all models" ? "주간" : `주간·${w.label}`}
+                    </span>
+                    <span class="meter">
+                      <span class="fill" style={`width:${Math.min(100, p)}%`}></span>
+                    </span>
+                    <span class="uwin-pct">{p.toFixed(0)}%</span>
+                    {#if w.resets_label}
+                      <span class="muted small reset">리셋 {w.resets_label}</span>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
             {/if}
           </div>
           {#if healthNote(s)}
@@ -247,6 +277,45 @@
     display: block;
     height: 100%;
     background: #4f8ef7;
+  }
+  .cli-usage {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+  }
+  .uwin {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .uwin .meter {
+    flex: 1 1 60px;
+  }
+  .uwin-label {
+    flex: 0 0 auto;
+    min-width: 3.2em;
+    font-size: 0.78rem;
+  }
+  .uwin-pct {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.78rem;
+  }
+  .uwin .reset {
+    flex-basis: 100%;
+  }
+  /* Usage-rate emphasis: amber ≥70%, red ≥90%. */
+  .uwin.warn .fill {
+    background: #e0a83a;
+  }
+  .uwin.crit .fill {
+    background: #e0524f;
+  }
+  .uwin.crit .uwin-pct {
+    color: #e0524f;
+    font-weight: 700;
   }
   footer {
     margin-top: auto;

@@ -20,6 +20,10 @@ use crate::sources::{self, RecentEvents, SourceCursors, UsageSource};
 
 pub const REFRESH_INTERVAL_SECS: u64 = 180;
 
+/// Minimum gap between `claude -p "/usage"` shell-outs. The call spawns a
+/// process (~seconds), so it is throttled independently of the scan cycle.
+pub const CLAUDE_USAGE_MIN_INTERVAL_SECS: i64 = 120;
+
 pub struct AppState(pub Mutex<Engine>);
 
 pub struct Engine {
@@ -201,6 +205,21 @@ impl Engine {
             }
         }
 
+        // Real Claude /usage via the `claude` CLI — throttled (shell-out is
+        // ~seconds). Keep the last good reading on failure; only bump the
+        // timestamp so we retry no more than once per interval.
+        let due = self.cache.claude_cli_usage.as_ref().map_or(true, |(at, _)| {
+            (Utc::now() - *at).num_seconds() >= CLAUDE_USAGE_MIN_INTERVAL_SECS
+        });
+        if due {
+            let fetched = crate::sources::claude_usage::fetch();
+            if matches!(fetched, RateLimitStatus::Cli { .. }) {
+                self.cache.claude_cli_usage = Some((Utc::now(), fetched));
+            } else if let Some((at, _)) = self.cache.claude_cli_usage.as_mut() {
+                *at = Utc::now();
+            }
+        }
+
         if let Err(err) = cache::save(&self.cache_path, &self.cache) {
             eprintln!("meterly: cache save failed: {err}");
         }
@@ -258,9 +277,11 @@ impl Engine {
                     })
                     .collect();
                 let rate_limit = match rt.id {
-                    SourceId::ClaudeCode => {
-                        aggregate::claude_window_estimate(&self.cache.recent_events, now)
-                    }
+                    SourceId::ClaudeCode => match &self.cache.claude_cli_usage {
+                        // Real /usage readout when we have one; else estimate.
+                        Some((_, rl @ RateLimitStatus::Cli { .. })) => rl.clone(),
+                        _ => aggregate::claude_window_estimate(&self.cache.recent_events, now),
+                    },
                     SourceId::Codex => {
                         let live = rt
                             .source

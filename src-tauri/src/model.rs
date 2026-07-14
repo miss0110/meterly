@@ -66,9 +66,21 @@ pub enum SourceHealth {
     Error { reason: String },
 }
 
+/// One usage window as printed by `claude -p "/usage"`, e.g.
+/// `Current week (all models): 6% used · resets Jul 19 at 9pm`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    /// Window label inside the parentheses ("all models", "Fable", …).
+    pub label: String,
+    pub used_percent: f64,
+    /// Reset text exactly as the CLI printed it (no fragile date parsing).
+    pub resets_label: Option<String>,
+}
+
 /// Rate-limit view per source. `Estimated` is Claude's local heuristic (UI
 /// label "추정"); `Measured` comes from Codex log `rate_limits` snapshots
-/// (UI label "로그 기준", `resets_at` converted from epoch seconds).
+/// (UI label "로그 기준", `resets_at` converted from epoch seconds); `Cli` is
+/// the real `/usage` readout shelled out via the `claude` binary (UI "실시간").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitStatus {
@@ -83,6 +95,12 @@ pub enum RateLimitStatus {
         secondary_used_percent: Option<f64>,
         window_minutes: u64,
         resets_at: DateTime<Utc>,
+    },
+    /// Real usage from `claude -p "/usage"`: an optional session line plus the
+    /// weekly windows.
+    Cli {
+        session_percent: Option<f64>,
+        windows: Vec<UsageWindow>,
     },
     Unavailable,
 }
