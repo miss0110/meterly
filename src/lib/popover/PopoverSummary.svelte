@@ -13,6 +13,7 @@
     formatTokens,
     formatCost,
     formatResetTime,
+    windowLabel,
     LABEL_ESTIMATED,
     LABEL_MEASURED,
     LABEL_CLI,
@@ -81,8 +82,14 @@
       return { badge: LABEL_CLI, rows };
     }
     const m = rl.measured;
+    // Codex labels the window by its length, not by primary/secondary
+    // position — the single window it currently reports is the weekly one.
     const rows: UsageRow[] = [
-      { label: "세션", percent: m.primary_used_percent, reset: formatResetTime(m.resets_at) },
+      {
+        label: windowLabel(m.window_minutes),
+        percent: m.primary_used_percent,
+        reset: formatResetTime(m.resets_at),
+      },
     ];
     if (m.secondary_used_percent !== null) {
       rows.push({
