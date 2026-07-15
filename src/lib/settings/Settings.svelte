@@ -24,19 +24,21 @@
     { id: "icon", label: "아이콘만" },
   ];
 
-  async function chooseDisplay(mode: string) {
-    await setTrayDisplay(mode);
+  // Update the control immediately (optimistic), persist in the background —
+  // the UI shouldn't wait on the IPC round-trip to reflect the choice.
+  function chooseDisplay(mode: string) {
     if (s) s.tray_display = mode;
+    void setTrayDisplay(mode);
   }
-  async function toggleAutostart(e: Event) {
+  function toggleAutostart(e: Event) {
     const enabled = (e.currentTarget as HTMLInputElement).checked;
-    await setAutostart(enabled);
     if (s) s.autostart = enabled;
+    void setAutostart(enabled);
   }
-  async function toggleAlerts(e: Event) {
+  function toggleAlerts(e: Event) {
     const enabled = (e.currentTarget as HTMLInputElement).checked;
-    await setAlertsEnabled(enabled);
     if (s) s.alerts_enabled = enabled;
+    void setAlertsEnabled(enabled);
   }
   const DATE_FORMATS = [
     { id: "auto", label: "자동 (지역 표준)" },
@@ -44,17 +46,17 @@
     { id: "us", label: "7/19 8:59 PM" },
     { id: "eu", label: "19/7 20:59" },
   ];
-  async function chooseDateFormat(e: Event) {
+  function chooseDateFormat(e: Event) {
     const fmt = (e.currentTarget as HTMLSelectElement).value;
-    await setDateFormat(fmt);
     if (s) s.date_format = fmt;
+    void setDateFormat(fmt);
   }
   // Budget is entered/shown in millions of tokens; stored as raw tokens.
-  async function saveBudget(e: Event) {
+  function saveBudget(e: Event) {
     const m = parseFloat((e.currentTarget as HTMLInputElement).value);
     const tokens = Number.isFinite(m) && m > 0 ? Math.round(m * 1_000_000) : 0;
-    await setMonthlyBudget(tokens);
     if (s) s.monthly_budget_tokens = tokens > 0 ? tokens : null;
+    void setMonthlyBudget(tokens);
   }
   async function pick() {
     const p = await pickSyncFolder();

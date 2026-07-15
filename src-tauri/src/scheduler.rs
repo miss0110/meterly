@@ -1019,6 +1019,14 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .body(body)
             .show();
     }
+    publish_tray_and_emit(app, &summary);
+    Some(summary)
+}
+
+/// Rebuild the tray rotation from a summary and emit `usage-updated`. Shared by
+/// the full refresh and the lightweight `republish`; does NOT rescan.
+fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
+    let state = app.state::<AppState>();
     let (display, devices) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -1058,8 +1066,19 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
     };
     apply_tray_title(app, &snapshot);
 
-    let _ = app.emit("usage-updated", &summary);
-    Some(summary)
+    let _ = app.emit("usage-updated", summary);
+}
+
+/// Re-emit the current summary + rebuild the tray WITHOUT rescanning — for
+/// display-only setting changes (tray mode, date format) that don't need fresh
+/// data. Much cheaper than `refresh_and_publish` (no file scan, no CLI calls).
+pub fn republish(app: &AppHandle) {
+    let summary = {
+        let state = app.state::<AppState>();
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.summary()
+    };
+    publish_tray_and_emit(app, &summary);
 }
 
 /// Change the tray display mode ("tokens"|"cost"|"icon"), persist, refresh.
@@ -1071,10 +1090,9 @@ pub fn set_tray_display(app: &AppHandle, mode: &str) {
         let path = engine.cache_path.clone();
         let _ = cache::save(&path, &engine.cache);
     }
+    // Display-only change → cheap republish (no rescan).
     let app = app.clone();
-    std::thread::spawn(move || {
-        let _ = refresh_and_publish(&app);
-    });
+    std::thread::spawn(move || republish(&app));
 }
 
 /// Toggle plan-usage threshold notifications and persist.
@@ -1105,10 +1123,9 @@ pub fn set_date_format(app: &AppHandle, format: String) {
         let path = engine.cache_path.clone();
         let _ = cache::save(&path, &engine.cache);
     }
+    // Display-only change → cheap republish (no rescan).
     let app = app.clone();
-    std::thread::spawn(move || {
-        let _ = refresh_and_publish(&app);
-    });
+    std::thread::spawn(move || republish(&app));
 }
 
 /// Set (or clear with `None`) the multi-device sync folder, persist, then
