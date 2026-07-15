@@ -84,11 +84,12 @@ impl UsageSource for ClaudeCodeSource {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let project = file_project(&content);
             for line in content.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                match parse_line(line, &session_id) {
+                match parse_line(line, &session_id, &project) {
                     LineOutcome::Event(event) => match &event.dedup_key {
                         Some(key) => {
                             if let Some(&idx) = by_key.get(key) {
@@ -190,7 +191,29 @@ enum LineOutcome {
     Skipped,
 }
 
-fn parse_line(line: &str, session_id: &str) -> LineOutcome {
+/// The session's project (basename of its `cwd`). Claude stamps `cwd` on many
+/// records; the first one we find applies to the whole session file.
+fn file_project(content: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct CwdOnly {
+        cwd: Option<String>,
+    }
+    for line in content.lines() {
+        if !line.contains("\"cwd\"") {
+            continue;
+        }
+        if let Ok(c) = serde_json::from_str::<CwdOnly>(line) {
+            if let Some(cwd) = c.cwd {
+                if let Some(p) = crate::sources::project_from_cwd(&cwd) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_line(line: &str, session_id: &str, project: &Option<String>) -> LineOutcome {
     let raw: RawRecord = match serde_json::from_str(line) {
         Ok(raw) => raw,
         Err(_) => return LineOutcome::Skipped,
@@ -227,6 +250,7 @@ fn parse_line(line: &str, session_id: &str) -> LineOutcome {
         dedup_key,
         timestamp: timestamp.with_timezone(&chrono::Utc),
         model: message.model,
+        project: project.clone(),
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_read_tokens: usage.cache_read_input_tokens,

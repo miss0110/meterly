@@ -229,6 +229,30 @@
     </section>
   {/if}
 
+  {#if data && data.projects.length}
+    {@const projMax = data.projects[0]?.tokens.total || 1}
+    <section class="chart-block">
+      <h2>프로젝트별 <span class="muted">(기간 합계)</span></h2>
+      <div class="projects">
+        {#each data.projects.slice(0, 15) as p (p.project)}
+          <div class="proj-row">
+            <span class="proj-name" title={p.project}>{p.project}</span>
+            <span class="proj-bar">
+              <span class="proj-fill" style={`width:${(p.tokens.total / projMax) * 100}%`}></span>
+            </span>
+            <span class="proj-tok">{formatTokens(p.tokens.total)} tok</span>
+            <span class="proj-cost muted">
+              {p.cost_usd === null ? LABEL_COST_NA : formatCost(p.cost_usd)}
+            </span>
+          </div>
+        {/each}
+        {#if data.projects.length > 15}
+          <div class="muted small">그 외 {data.projects.length - 15}개 프로젝트</div>
+        {/if}
+      </div>
+    </section>
+  {/if}
+
   <section class="grid-2">
     <div class="chart-block">
       <h2>도구별 추이 <span class="muted">(토큰)</span></h2>
@@ -459,6 +483,46 @@
   .dev-cost,
   .dev-when {
     font-size: 0.75rem;
+  }
+  .projects {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .proj-row {
+    display: grid;
+    grid-template-columns: minmax(6rem, 1.4fr) 3fr auto auto;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.3rem 0.1rem;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+  }
+  .proj-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .proj-bar {
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.18);
+    overflow: hidden;
+  }
+  .proj-fill {
+    display: block;
+    height: 100%;
+    background: #4f8ef7;
+    border-radius: 4px;
+  }
+  .proj-tok {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    text-align: right;
+  }
+  .proj-cost {
+    font-size: 0.75rem;
+    text-align: right;
   }
   .heatmap {
     display: grid;

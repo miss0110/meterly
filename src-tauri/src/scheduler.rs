@@ -261,6 +261,14 @@ pub struct DeviceRangeUsage {
     pub cost_usd: Option<f64>,
 }
 
+/// Per-project token/cost total over the selected dashboard range.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectUsage {
+    pub project: String,
+    pub tokens: TokenBreakdown,
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardData {
     pub range: String,
@@ -269,6 +277,8 @@ pub struct DashboardData {
     /// Per-host totals for the range — only populated in the combined ("all")
     /// scope; empty for the local view.
     pub devices: Vec<DeviceRangeUsage>,
+    /// Per-project totals for the range (across sources), highest first.
+    pub projects: Vec<ProjectUsage>,
 }
 
 impl Engine {
@@ -655,6 +665,38 @@ impl Engine {
             }
         }
         rows.sort_by(|a, b| a.period.cmp(&b.period));
+
+        // Per-project totals over the range (across sources). Buckets with no
+        // project (pre-project data) fold into "(기타)".
+        let mut by_project: HashMap<String, ProjectUsage> = HashMap::new();
+        for b in &buckets {
+            if b.date < start {
+                continue;
+            }
+            let name = b.project.clone().unwrap_or_else(|| "(기타)".to_string());
+            let pu = by_project.entry(name.clone()).or_insert_with(|| ProjectUsage {
+                project: name,
+                tokens: TokenBreakdown {
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_creation: 0,
+                    total: 0,
+                },
+                cost_usd: None,
+            });
+            pu.tokens.input += b.input;
+            pu.tokens.output += b.output;
+            pu.tokens.cache_read += b.cache_read;
+            pu.tokens.cache_creation += b.cache_creation;
+            pu.tokens.total += b.total();
+            if let Some(c) = b.cost_usd() {
+                *pu.cost_usd.get_or_insert(0.0) += c;
+            }
+        }
+        let mut projects: Vec<ProjectUsage> = by_project.into_values().collect();
+        projects.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total));
+
         DashboardData {
             range: range.to_string(),
             rows,
@@ -663,6 +705,7 @@ impl Engine {
                 Local::now().format("%Z")
             ),
             devices,
+            projects,
         }
     }
 

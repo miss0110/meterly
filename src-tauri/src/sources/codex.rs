@@ -154,14 +154,17 @@ impl CodexSource {
         content: &str,
         seed_total: Option<u64>,
         seed_model: Option<String>,
+        seed_project: Option<String>,
         events: &mut Vec<UsageEvent>,
-    ) -> (u64, u64, Option<u64>, Option<String>) {
+    ) -> (u64, u64, Option<u64>, Option<String>, Option<String>) {
         let mut skipped: u64 = 0;
         let mut consumed: u64 = 0;
         // T1 (a) rule state: previous cumulative total in THIS file.
         let mut prev_total: Option<u64> = seed_total;
         // T1 (e): latest preceding turn_context model in THIS file.
         let mut current_model: Option<String> = seed_model;
+        // Session project (from session_meta cwd) in THIS file.
+        let mut current_project: Option<String> = seed_project;
 
         for chunk in content.split_inclusive('\n') {
             let terminated = chunk.ends_with('\n');
@@ -180,6 +183,7 @@ impl CodexSource {
                         &mut skipped,
                         &mut prev_total,
                         &mut current_model,
+                        &mut current_project,
                         events,
                     );
                 }
@@ -195,10 +199,11 @@ impl CodexSource {
                 &mut skipped,
                 &mut prev_total,
                 &mut current_model,
+                &mut current_project,
                 events,
             );
         }
-        (skipped, consumed, prev_total, current_model)
+        (skipped, consumed, prev_total, current_model, current_project)
     }
 
     /// Handle one complete JSONL record line (T5 rules unchanged).
@@ -209,6 +214,7 @@ impl CodexSource {
         skipped: &mut u64,
         prev_total: &mut Option<u64>,
         current_model: &mut Option<String>,
+        current_project: &mut Option<String>,
         events: &mut Vec<UsageEvent>,
     ) {
         let record: RawRecord = match serde_json::from_str(line) {
@@ -220,6 +226,14 @@ impl CodexSource {
         };
         let payload = record.payload.as_ref();
         match record.kind.as_deref() {
+            Some("session_meta") => {
+                if let Some(cwd) = payload
+                    .and_then(|p| p.get("cwd"))
+                    .and_then(|c| c.as_str())
+                {
+                    *current_project = crate::sources::project_from_cwd(cwd);
+                }
+            }
             Some("turn_context") => {
                 if let Some(model) = payload
                     .and_then(|p| p.get("model"))
@@ -294,13 +308,14 @@ impl CodexSource {
                     dedup_key: None, // Codex identity = uuid cursor, not key
                     timestamp,
                     model: current_model.clone(),
+                    project: current_project.clone(),
                     input_tokens: net_input,
                     output_tokens: last.output_tokens,
                     cache_read_tokens: last.cached_input_tokens,
                     cache_creation_tokens: 0,
                 });
             }
-            _ => {} // session_meta, response_item, legacy flat records, …
+            _ => {} // response_item, legacy flat records, …
         }
     }
 
@@ -435,7 +450,7 @@ impl UsageSource for CodexSource {
             }
 
             let prior = cursors.0.get(uuid);
-            let (start_offset, seed_total, seed_model) = match prior {
+            let (start_offset, seed_total, seed_model, seed_project) = match prior {
                 // Truncation/rewrite backstop: cursors are untrustworthy.
                 Some(c) if size < c.offset => {
                     needs_rebuild = true;
@@ -446,8 +461,8 @@ impl UsageSource for CodexSource {
                     new_cursors.0.insert(uuid.clone(), c.clone());
                     continue;
                 }
-                Some(c) => (c.offset, c.prev_total, c.model.clone()),
-                None => (0u64, None, None),
+                Some(c) => (c.offset, c.prev_total, c.model.clone(), c.project.clone()),
+                None => (0u64, None, None, None),
             };
 
             use std::io::{Read, Seek, SeekFrom};
@@ -477,8 +492,8 @@ impl UsageSource for CodexSource {
                 continue;
             }
 
-            let (skipped, consumed, prev_total, model) =
-                self.parse_content(uuid, &content, seed_total, seed_model, &mut events);
+            let (skipped, consumed, prev_total, model, project) =
+                self.parse_content(uuid, &content, seed_total, seed_model, seed_project, &mut events);
             skipped_lines += skipped;
             new_cursors.0.insert(
                 uuid.clone(),
@@ -488,6 +503,7 @@ impl UsageSource for CodexSource {
                     mtime_epoch: mtime,
                     prev_total,
                     model,
+                    project,
                 },
             );
         }

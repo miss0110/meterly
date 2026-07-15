@@ -110,11 +110,18 @@ export interface DeviceRangeUsage {
   cost_usd: number | null;
 }
 
+export interface ProjectUsage {
+  project: string;
+  tokens: TokenBreakdown;
+  cost_usd: number | null;
+}
+
 export interface DashboardData {
   range: string;
   rows: DashboardRow[];
   timezone_note: string;
   devices: DeviceRangeUsage[];
+  projects: ProjectUsage[];
 }
 
 export interface HeatmapCell {
