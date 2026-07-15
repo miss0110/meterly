@@ -17,8 +17,7 @@
   });
 
   const DISPLAY = [
-    { id: "tokens", label: "토큰 표시" },
-    { id: "cost", label: "비용 표시 (API 환산)" },
+    { id: "tokens", label: "사용량·비용 표시 (순환)" },
     { id: "icon", label: "아이콘만" },
   ];
 
@@ -55,8 +54,7 @@
             <input
               type="radio"
               name="display"
-              checked={s.tray_display === d.id ||
-                (d.id === "tokens" && s.tray_display !== "cost" && s.tray_display !== "icon")}
+              checked={d.id === "icon" ? s.tray_display === "icon" : s.tray_display !== "icon"}
               onchange={() => chooseDisplay(d.id)}
             />
             {d.label}
