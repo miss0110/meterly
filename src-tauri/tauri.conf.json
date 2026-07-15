@@ -15,7 +15,7 @@
         "label": "popover",
         "url": "index.html?window=popover",
         "title": "meterly",
-        "width": 360,
+        "width": 420,
         "height": 600,
         "decorations": false,
         "resizable": false,
