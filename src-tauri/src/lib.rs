@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod aggregate;
 pub mod cache;
 pub mod commands;

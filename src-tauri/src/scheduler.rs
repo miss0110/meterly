@@ -16,13 +16,17 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::aggregate::{self, DailyBucket};
 use crate::cache::{self, CacheV1};
 use crate::model::{RateLimitStatus, SourceHealth, SourceId};
-use crate::sources::{self, RecentEvents, SourceCursors, UsageSource};
+use crate::sources::{self, SourceCursors, UsageSource};
 
 pub const REFRESH_INTERVAL_SECS: u64 = 180;
 
 /// Minimum gap between `claude -p "/usage"` shell-outs. The call spawns a
 /// process (~seconds), so it is throttled independently of the scan cycle.
 pub const CLAUDE_USAGE_MIN_INTERVAL_SECS: i64 = 120;
+
+/// Minimum gap between `codex app-server` reads (real Codex plan usage). Same
+/// rationale as the Claude one — it spawns a process, so throttle it.
+pub const CODEX_USAGE_MIN_INTERVAL_SECS: i64 = 120;
 
 /// Seconds between tray-title rotations (전체 ↔ 이 기기) when 2+ devices sync.
 pub const TRAY_ROTATE_SECS: u64 = 5;
@@ -47,6 +51,9 @@ pub struct Engine {
     /// Limit-notification dedup: (threshold %, window resets_at) already
     /// notified for. Cleared when the window rolls over or usage drops.
     notified_limit: Option<(u8, chrono::DateTime<Utc>)>,
+    /// Logged-in account per source (read once from local auth files).
+    claude_account: Option<String>,
+    codex_account: Option<String>,
 }
 
 struct Runtime {
@@ -79,6 +86,8 @@ pub struct SourceSummary {
     /// Daily totals for the last 7 days (oldest → today) — popover/card
     /// sparklines.
     pub last7_totals: Vec<u64>,
+    /// Logged-in account this source measures (e.g. "email · Team"), if known.
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,6 +252,8 @@ impl Engine {
             cache,
             runtimes,
             notified_limit: None,
+            claude_account: crate::accounts::claude_account(),
+            codex_account: crate::accounts::codex_account(),
         }
     }
 
@@ -326,19 +337,6 @@ impl Engine {
         aggregate::prune_hourly(&mut self.cache.hourly_claude, window_start);
         aggregate::prune_hourly(&mut self.cache.hourly_codex, window_start);
 
-        // Persist the freshest measured Codex snapshot so a restarted app
-        // shows limits immediately (until the next token_count refreshes).
-        for rt in &self.runtimes {
-            if rt.id == SourceId::Codex {
-                let rl = rt
-                    .source
-                    .rate_limit(&RecentEvents(self.cache.recent_events.clone()));
-                if matches!(rl, RateLimitStatus::Measured { .. }) {
-                    self.cache.codex_rate_limit = Some(rl);
-                }
-            }
-        }
-
         // Real Claude /usage via the `claude` CLI — throttled (shell-out is
         // ~seconds). Keep the last good reading on failure; only bump the
         // timestamp so we retry no more than once per interval.
@@ -350,6 +348,25 @@ impl Engine {
             if matches!(fetched, RateLimitStatus::Cli { .. }) {
                 self.cache.claude_cli_usage = Some((Utc::now(), fetched));
             } else if let Some((at, _)) = self.cache.claude_cli_usage.as_mut() {
+                *at = Utc::now();
+            }
+        }
+
+        // Real Codex plan usage via `codex app-server` — same throttle/keep-last
+        // policy as Claude. This is the live number the ChatGPT panel shows, so
+        // it supersedes the (often 0%) local log snapshot.
+        let codex_due = self
+            .cache
+            .codex_appserver_usage
+            .as_ref()
+            .map_or(true, |(at, _)| {
+                (Utc::now() - *at).num_seconds() >= CODEX_USAGE_MIN_INTERVAL_SECS
+            });
+        if codex_due {
+            let fetched = crate::sources::codex_usage::fetch();
+            if matches!(fetched, RateLimitStatus::Measured { .. }) {
+                self.cache.codex_appserver_usage = Some((Utc::now(), fetched));
+            } else if let Some((at, _)) = self.cache.codex_appserver_usage.as_mut() {
                 *at = Utc::now();
             }
         }
@@ -495,20 +512,19 @@ impl Engine {
                         _ => aggregate::claude_window_estimate(&self.cache.recent_events, now),
                     },
                     SourceId::Codex => {
-                        let live = rt
-                            .source
-                            .rate_limit(&RecentEvents(self.cache.recent_events.clone()));
-                        match live {
-                            // Fresh scan hasn't seen a snapshot yet (e.g.
-                            // right after restart) → persisted fallback.
-                            RateLimitStatus::Unavailable => self
-                                .cache
-                                .codex_rate_limit
-                                .clone()
-                                .unwrap_or(RateLimitStatus::Unavailable),
-                            other => other,
+                        // Live plan usage from `codex app-server` — matches the
+                        // ChatGPT panel. The old local log snapshot is the
+                        // source of the stale/0% reading we're replacing, so we
+                        // no longer fall back to it: real number or nothing.
+                        match &self.cache.codex_appserver_usage {
+                            Some((_, rl @ RateLimitStatus::Measured { .. })) => rl.clone(),
+                            _ => RateLimitStatus::Unavailable,
                         }
                     }
+                };
+                let account = match rt.id {
+                    SourceId::ClaudeCode => self.claude_account.clone(),
+                    SourceId::Codex => self.codex_account.clone(),
                 };
                 SourceSummary {
                     id: rt.id,
@@ -519,6 +535,7 @@ impl Engine {
                     today_cache_saved_usd: saved,
                     rate_limit,
                     last7_totals,
+                    account,
                 }
             })
             .collect();

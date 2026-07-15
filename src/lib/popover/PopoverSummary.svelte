@@ -109,6 +109,16 @@
     return `${Math.floor(h / 24)}일 전`;
   }
 
+  // Account strings are "email · plan" (e.g. "…@… · AI CIC Group_2",
+  // "…@… · ChatGPT"). Split so the email can truncate and the plan render as
+  // a distinct pill instead of one run-on muted line.
+  function splitAccount(a: string): { email: string; plan: string | null } {
+    const i = a.indexOf(" · ");
+    return i === -1
+      ? { email: a, plan: null }
+      : { email: a.slice(0, i), plan: a.slice(i + 3) };
+  }
+
   async function doRefresh() {
     refreshing = true;
     try {
@@ -200,39 +210,48 @@
   {:else}
     {#each summary.sources as s (s.id)}
       <section class="source" style={`--accent:${t.sources[s.id] ?? "#8a8983"}`}>
-        <div class="row top">
+        <div class="head">
           <span class="name"><span class="dot"></span>{s.display_name}</span>
-          {#if healthError(s)}
-            <span class="warn" title={healthError(s)}
-              >{LABEL_READ_ERROR} (포맷 미지원)</span
-            >
-          {:else}
-            {#if isLocalView}
-              <span class="spark">
-                <Sparkline
-                  values={s.last7_totals}
-                  color={t.sources[s.id] ?? "#8a8983"}
-                  width={56}
-                  height={18}
-                />
-              </span>
+          <div class="headline">
+            {#if isLocalView && !healthError(s)}
+              <Sparkline
+                values={s.last7_totals}
+                color={t.sources[s.id] ?? "#8a8983"}
+                width={64}
+                height={20}
+              />
             {/if}
-            <span class="tokens">{formatTokens(shownTokens(s).total)} tok</span>
-          {/if}
+            {#if healthError(s)}
+              <span class="warn" title={healthError(s)}>{LABEL_READ_ERROR}</span>
+            {:else}
+              <span class="tokens"
+                >{formatTokens(shownTokens(s).total)}<span class="unit"> tok</span></span
+              >
+            {/if}
+          </div>
         </div>
+        {#if s.account}
+          {@const acct = splitAccount(s.account)}
+          <div class="acct" title={s.account}>
+            <span class="email">{acct.email}</span>
+            {#if acct.plan}<span class="plan">{acct.plan}</span>{/if}
+          </div>
+        {/if}
+
         {#if !healthError(s)}
           {@const tk = shownTokens(s)}
           {@const cost = shownCost(s)}
           {@const saved = shownSaved(s)}
-          <div class="row detail">
-            <span class="muted">
+          <div class="stats">
+            <span class="muted io">
               in {formatTokens(tk.input)} · out
               {formatTokens(tk.output)} · cache
               {formatTokens(tk.cache_read + tk.cache_creation)}
             </span>
             <span class="cost" title="구독 요금이 아닌 API 정가 환산값">
-              {LABEL_COST}
-              {cost === null ? LABEL_COST_NA : formatCost(cost)}
+              <span class="cost-main"
+                >{LABEL_COST} {cost === null ? LABEL_COST_NA : formatCost(cost)}</span
+              >
               {#if saved !== null && saved >= 0.01}
                 <span class="saved" title="캐시 읽기를 정가 입력으로 환산했을 때 대비 절약액">
                   캐시로 {formatCost(saved)} 절약
@@ -240,11 +259,12 @@
               {/if}
             </span>
           </div>
-          <div class="row limit">
+
+          <div class="limits">
             {#if s.rate_limit === "unavailable"}
-              <span class="muted">한도 정보 없음</span>
+              <span class="muted small">한도 정보 없음</span>
             {:else if "estimated" in s.rate_limit}
-              <span class="muted">
+              <span class="muted small">
                 <b class="badge">{LABEL_ESTIMATED}</b>
                 {s.rate_limit.estimated.window_hours}시간 창
                 {formatTokens(s.rate_limit.estimated.window_tokens)} tok ·
@@ -254,7 +274,7 @@
               {@const uv = usageView(s.rate_limit)}
               {#if uv}
                 <div class="usage">
-                  <span class="muted"><b class="badge">{uv.badge}</b></span>
+                  <span class="lim-head"><b class="badge">{uv.badge}</b></span>
                   {#each uv.rows as r}
                     <div class="uwin" class:warn={r.percent >= 70} class:crit={r.percent >= 90}>
                       <span class="uwin-label" title={r.label}>{r.label}</span>
@@ -337,6 +357,48 @@
     align-items: center;
     gap: 8px;
   }
+  /* Card identity zone: name (left) + sparkline & big token figure (right),
+     then the account on its own full-width line so the email isn't boxed
+     into the left half and truncated. */
+  .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .headline {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex: 0 0 auto;
+  }
+  .acct {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    width: 100%;
+    margin-top: -2px;
+  }
+  .email {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    opacity: 0.6;
+    font-size: 0.76rem;
+  }
+  .plan {
+    flex: 0 0 auto;
+    font-size: 0.66rem;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: rgba(128, 128, 128, 0.16);
+    white-space: nowrap;
+    opacity: 0.9;
+  }
   .scope {
     font: inherit;
     font-size: 11.5px;
@@ -384,7 +446,7 @@
     padding: 0.6rem 0.7rem;
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    gap: 0.5rem;
   }
   .row {
     display: flex;
@@ -405,15 +467,39 @@
     background: var(--accent, #8a8983);
     display: inline-block;
   }
-  .row.top .spark {
-    margin-left: auto;
-    display: inline-flex;
-    align-items: flex-end;
-  }
   .tokens {
     font-variant-numeric: tabular-nums;
     font-weight: 700;
-    font-size: 1.05rem;
+    font-size: 1.15rem;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .unit {
+    font-size: 0.72rem;
+    font-weight: 600;
+    opacity: 0.6;
+  }
+  /* Economics zone — usage detail (left) + cost/savings (right), divided
+     from the identity zone above. */
+  .stats {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(128, 128, 128, 0.16);
+  }
+  .io {
+    font-size: 0.76rem;
+  }
+  /* Limits zone — badge + usage bars, divided from economics. */
+  .limits {
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(128, 128, 128, 0.16);
+  }
+  .lim-head {
+    display: block;
+    margin-bottom: 6px;
   }
   .warn {
     color: #c47912;
@@ -428,9 +514,14 @@
     display: inline-flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 0.1rem;
-    font-size: 0.8rem;
-    opacity: 0.85;
+    gap: 2px;
+    font-size: 0.76rem;
+    opacity: 0.9;
+    flex: 0 0 auto;
+    text-align: right;
+  }
+  .cost-main {
+    white-space: nowrap;
   }
   .saved {
     color: #008300;

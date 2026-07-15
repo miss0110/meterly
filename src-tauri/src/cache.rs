@@ -53,6 +53,11 @@ pub struct CacheV1 {
     /// back to the local estimate when absent/stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_cli_usage: Option<(chrono::DateTime<chrono::Utc>, RateLimitStatus)>,
+    /// Last real Codex plan usage read via `codex app-server` with the time it
+    /// was fetched — throttles the spawn and survives restarts. Falls back to
+    /// the local log snapshot (`codex_rate_limit`) when absent/failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_appserver_usage: Option<(chrono::DateTime<chrono::Utc>, RateLimitStatus)>,
     /// Folder (in a synced cloud drive) where this device writes its usage
     /// file and reads the others'. `None` = multi-device sync off (local only).
     #[serde(default, skip_serializing_if = "Option::is_none")]

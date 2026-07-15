@@ -8,6 +8,7 @@
 pub mod claude_code;
 pub mod claude_usage;
 pub mod codex;
+pub mod codex_usage;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -61,6 +61,8 @@ export interface SourceSummary {
   rate_limit: RateLimitStatus;
   /** Daily totals, oldest → today (7 entries) — sparklines. */
   last7_totals: number[];
+  /** Logged-in account this source measures (e.g. "email · Team"). */
+  account: string | null;
 }
 
 export interface Summary {
