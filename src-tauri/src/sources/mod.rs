@@ -87,6 +87,11 @@ pub struct SourceEntry {
     pub root_path: PathBuf,
     /// Parser constructor (AC7). `None` until the parser task lands.
     pub make_source: Option<fn(PathBuf) -> Box<dyn UsageSource>>,
+    /// Subdirectories of `root_path` to file-watch. Empty = watch `root_path`
+    /// itself. Codex narrows to the log dirs so the watcher ignores the noisy
+    /// rest of `~/.codex` (sqlite WAL churn, binary packages, browser/computer-
+    /// use state) — which caused refresh storms and needless access.
+    pub watch_subdirs: &'static [&'static str],
 }
 
 /// Manual impl: metadata fields only — fn-pointer addresses are not
@@ -111,12 +116,16 @@ pub fn registry() -> Vec<SourceEntry> {
             display_name: "Claude Code",
             root_path: resolve_root("METERLY_CLAUDE_DIR", &[".claude", "projects"]),
             make_source: Some(claude_code::make),
+            // root_path is already the leaf log dir.
+            watch_subdirs: &[],
         },
         SourceEntry {
             id: SourceId::Codex,
             display_name: "Codex",
             root_path: resolve_root("METERLY_CODEX_DIR", &[".codex"]),
             make_source: Some(codex::make),
+            // Only the log dirs, not all of ~/.codex.
+            watch_subdirs: &["sessions", "archived_sessions"],
         },
         // New sources register here: one `SourceEntry` per parser file (AC7).
     ]

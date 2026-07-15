@@ -1195,11 +1195,20 @@ fn watch_loop(app: AppHandle) {
 
     let mut watched = 0u32;
     for entry in sources::registry() {
-        if watcher
-            .watch(&entry.root_path, RecursiveMode::Recursive)
-            .is_ok()
-        {
-            watched += 1;
+        // Watch the narrow log dirs when a source declares them, else the root.
+        let targets: Vec<PathBuf> = if entry.watch_subdirs.is_empty() {
+            vec![entry.root_path.clone()]
+        } else {
+            entry
+                .watch_subdirs
+                .iter()
+                .map(|sub| entry.root_path.join(sub))
+                .collect()
+        };
+        for target in targets {
+            if watcher.watch(&target, RecursiveMode::Recursive).is_ok() {
+                watched += 1;
+            }
         }
     }
     if watched == 0 {
