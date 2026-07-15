@@ -346,10 +346,10 @@
 
 <style>
   .dashboard {
-    padding: 1rem 1.25rem;
+    padding: 1.25rem 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 1.5rem;
     box-sizing: border-box;
     height: 100%;
     overflow-y: auto;
@@ -364,8 +364,11 @@
     margin: 0;
   }
   h2 {
-    font-size: 0.85rem;
-    margin: 0 0 0.4rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin: 0 0 0.75rem;
+    color: color-mix(in srgb, CanvasText 62%, transparent);
   }
   nav {
     display: flex;
@@ -475,6 +478,10 @@
   }
   .chart-block {
     min-width: 0;
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 12px;
+    padding: 1rem 1.15rem;
+    background: color-mix(in srgb, CanvasText 3%, transparent);
   }
   .chart-wrap {
     position: relative;
