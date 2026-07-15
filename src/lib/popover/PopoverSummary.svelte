@@ -17,6 +17,7 @@
     formatTokens,
     formatCost,
     formatResetTime,
+    formatResetLabel,
     windowLabel,
     LABEL_ESTIMATED,
     LABEL_MEASURED,
@@ -184,7 +185,7 @@
         rows.push({
           label: w.label === "all models" ? "주간" : `주간·${w.label}`,
           percent: w.used_percent,
-          reset: w.resets_label,
+          reset: formatResetLabel(w.resets_label),
         });
       }
       return { badge: LABEL_CLI, rows };
