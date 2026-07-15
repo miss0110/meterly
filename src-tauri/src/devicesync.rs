@@ -81,6 +81,7 @@ mod tests {
             date: chrono::NaiveDate::from_ymd_opt(2026, 7, 14).unwrap(),
             source: SourceId::ClaudeCode,
             model: Some("claude-sonnet-5".into()),
+            project: None,
             input,
             output: 0,
             cache_read: 0,

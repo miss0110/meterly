@@ -69,13 +69,24 @@ pub fn fetch() -> RateLimitStatus {
     let Some(bin) = codex_binary() else {
         return RateLimitStatus::Unavailable;
     };
-    let mut child = match Command::new(bin)
-        .arg("app-server")
+    // Hardening for a background, GUI-launched context (see module docs):
+    //  - run in a neutral temp cwd so codex never touches the user's project
+    //    or protected folders (a Finder-launched app inherits cwd `/`), which
+    //    is what triggered the macOS folder/permission prompts;
+    //  - `-c notify=[]` disables the Computer Use notify hook;
+    //  - new process group so a stray child can't outlive us.
+    let mut cmd = Command::new(bin);
+    cmd.args(["app-server", "-c", "notify=[]"])
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return RateLimitStatus::Unavailable,
     };

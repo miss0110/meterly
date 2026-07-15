@@ -110,11 +110,31 @@ export interface DeviceRangeUsage {
   cost_usd: number | null;
 }
 
+export interface ProjectUsage {
+  project: string;
+  tokens: TokenBreakdown;
+  cost_usd: number | null;
+  claude_tokens: number;
+  codex_tokens: number;
+}
+
+export interface MonthUsage {
+  tokens: number;
+  cost_usd: number | null;
+  projected_tokens: number;
+  projected_cost_usd: number | null;
+  days_elapsed: number;
+  days_in_month: number;
+  budget_tokens: number | null;
+}
+
 export interface DashboardData {
   range: string;
   rows: DashboardRow[];
   timezone_note: string;
   devices: DeviceRangeUsage[];
+  projects: ProjectUsage[];
+  month: MonthUsage;
 }
 
 export interface HeatmapCell {
@@ -134,12 +154,21 @@ export interface SettingsData {
   tray_display: string; // "tokens" | "cost" | "icon"
   autostart: boolean;
   sync_dir: string | null;
+  alerts_enabled: boolean;
+  monthly_budget_tokens: number | null;
+  date_format: string; // "auto" | "iso" | "us" | "eu"
 }
 export const getSettings = () => invoke<SettingsData>("get_settings");
 export const setTrayDisplay = (mode: string) =>
   invoke<void>("set_tray_display", { mode });
 export const setAutostart = (enabled: boolean) =>
   invoke<void>("set_autostart", { enabled });
+export const setAlertsEnabled = (enabled: boolean) =>
+  invoke<void>("set_alerts_enabled", { enabled });
+export const setMonthlyBudget = (tokens: number) =>
+  invoke<void>("set_monthly_budget", { tokens });
+export const setDateFormat = (format: string) =>
+  invoke<void>("set_date_format", { format });
 export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
 export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
 export const checkForUpdates = () => invoke<void>("check_for_updates");

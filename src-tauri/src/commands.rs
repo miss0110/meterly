@@ -74,6 +74,9 @@ pub struct SettingsData {
     tray_display: String,
     autostart: bool,
     sync_dir: Option<String>,
+    alerts_enabled: bool,
+    monthly_budget_tokens: Option<u64>,
+    date_format: String,
 }
 
 /// Current values for the settings window.
@@ -86,7 +89,32 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
         tray_display: engine.cache.tray_display.clone().unwrap_or_default(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         sync_dir: engine.cache.sync_dir.clone(),
+        alerts_enabled: engine.cache.alerts_enabled.unwrap_or(true),
+        monthly_budget_tokens: engine.cache.monthly_budget_tokens,
+        date_format: engine
+            .cache
+            .date_format
+            .clone()
+            .unwrap_or_else(|| "auto".to_string()),
     }
+}
+
+/// Toggle plan-usage threshold notifications (30/50/70/90%).
+#[tauri::command]
+pub fn set_alerts_enabled(app: AppHandle, enabled: bool) {
+    crate::scheduler::set_alerts_enabled(&app, enabled);
+}
+
+/// Set (or clear with 0) the monthly token budget.
+#[tauri::command]
+pub fn set_monthly_budget(app: AppHandle, tokens: u64) {
+    crate::scheduler::set_monthly_budget(&app, (tokens > 0).then_some(tokens));
+}
+
+/// Set the date-format preference ("auto" | "iso" | "us" | "eu").
+#[tauri::command]
+pub fn set_date_format(app: AppHandle, format: String) {
+    crate::scheduler::set_date_format(&app, format);
 }
 
 #[tauri::command]

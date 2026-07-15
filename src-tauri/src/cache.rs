@@ -62,6 +62,17 @@ pub struct CacheV1 {
     /// file and reads the others'. `None` = multi-device sync off (local only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_dir: Option<String>,
+    /// Whether plan-usage threshold notifications fire. `None` = default (on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts_enabled: Option<bool>,
+    /// Optional monthly token budget (raw tokens). Drives the dashboard's
+    /// this-month progress bar + month-end projection. `None` = no budget set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_budget_tokens: Option<u64>,
+    /// Date/time display preference: "auto" (OS locale) | "iso" | "us" | "eu".
+    /// `None` = auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_format: Option<String>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

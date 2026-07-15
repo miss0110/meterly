@@ -40,6 +40,10 @@ pub struct UsageEvent {
     pub dedup_key: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub model: Option<String>,
+    /// Project the work happened in — the basename of the session's `cwd`
+    /// (never a full path). `None` when the log carried no cwd. Drives the
+    /// dashboard's per-project breakdown.
+    pub project: Option<String>,
     /// Non-cached input tokens only.
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -122,6 +126,7 @@ mod tests {
             dedup_key: Some("msg_fixture_1:req_fixture_1".into()),
             timestamp: Utc.with_ymd_and_hms(2026, 7, 13, 1, 2, 3).unwrap(),
             model: Some("claude-sonnet-5".into()),
+            project: None,
             input_tokens: 100,
             output_tokens: 50,
             cache_read_tokens: 1000,

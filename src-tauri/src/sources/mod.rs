@@ -31,6 +31,11 @@ pub struct CursorEntry {
     pub prev_total: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Session project (basename of `cwd`, from the session_meta record).
+    /// Carried across incremental scans since session_meta is only at the
+    /// file head and later scans start past it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Cursor map for one source. Key semantics are per-source: Claude uses the
@@ -55,6 +60,14 @@ pub struct ScanOutcome {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RecentEvents(pub Vec<UsageEvent>);
 
+/// Project label from a session `cwd`: its trailing path segment (e.g.
+/// `/Users/me/project/meterly` → `meterly`). Never the full path. `None` for
+/// an empty/rootless cwd.
+pub fn project_from_cwd(cwd: &str) -> Option<String> {
+    let name = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// Contract every usage source implements (plan: Contract surface).
 pub trait UsageSource: Send {
     fn id(&self) -> SourceId;
@@ -74,6 +87,11 @@ pub struct SourceEntry {
     pub root_path: PathBuf,
     /// Parser constructor (AC7). `None` until the parser task lands.
     pub make_source: Option<fn(PathBuf) -> Box<dyn UsageSource>>,
+    /// Subdirectories of `root_path` to file-watch. Empty = watch `root_path`
+    /// itself. Codex narrows to the log dirs so the watcher ignores the noisy
+    /// rest of `~/.codex` (sqlite WAL churn, binary packages, browser/computer-
+    /// use state) — which caused refresh storms and needless access.
+    pub watch_subdirs: &'static [&'static str],
 }
 
 /// Manual impl: metadata fields only — fn-pointer addresses are not
@@ -98,12 +116,16 @@ pub fn registry() -> Vec<SourceEntry> {
             display_name: "Claude Code",
             root_path: resolve_root("METERLY_CLAUDE_DIR", &[".claude", "projects"]),
             make_source: Some(claude_code::make),
+            // root_path is already the leaf log dir.
+            watch_subdirs: &[],
         },
         SourceEntry {
             id: SourceId::Codex,
             display_name: "Codex",
             root_path: resolve_root("METERLY_CODEX_DIR", &[".codex"]),
             make_source: Some(codex::make),
+            // Only the log dirs, not all of ~/.codex.
+            watch_subdirs: &["sessions", "archived_sessions"],
         },
         // New sources register here: one `SourceEntry` per parser file (AC7).
     ]
@@ -128,6 +150,16 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
+    #[test]
+    fn project_from_cwd_takes_trailing_segment() {
+        assert_eq!(project_from_cwd("/Users/me/project/meterly").as_deref(), Some("meterly"));
+        assert_eq!(project_from_cwd("/Users/me/project/meterly/").as_deref(), Some("meterly"));
+        assert_eq!(project_from_cwd("C:\\src\\bizcall").as_deref(), Some("bizcall"));
+        assert_eq!(project_from_cwd("meterly").as_deref(), Some("meterly"));
+        assert_eq!(project_from_cwd(""), None);
+        assert_eq!(project_from_cwd("/"), None);
+    }
+
     /// Compile-time proof the trait is object safe (scheduler holds
     /// `Box<dyn UsageSource>`).
     fn _assert_object_safe(_: &mut dyn UsageSource) {}
@@ -150,6 +182,7 @@ mod tests {
                     dedup_key: None,
                     timestamp: Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap(),
                     model: Some("gpt-5.5".into()),
+                    project: None,
                     input_tokens: 10,
                     output_tokens: 5,
                     cache_read_tokens: 0,

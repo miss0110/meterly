@@ -5,11 +5,12 @@
 //! buckets are REPLACED; Codex scans incrementally via uuid cursors and its
 //! buckets are ADDITIVE (rebuild-on-flag is the only recovery path).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use chrono::{Local, Utc};
+use chrono::{Datelike, Local, NaiveDate, Utc};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -48,9 +49,10 @@ pub struct Engine {
     cache_path: PathBuf,
     pub cache: CacheV1,
     runtimes: Vec<Runtime>,
-    /// Limit-notification dedup: (threshold %, window resets_at) already
-    /// notified for. Cleared when the window rolls over or usage drops.
-    notified_limit: Option<(u8, chrono::DateTime<Utc>)>,
+    /// Limit-notification dedup, keyed by gauge (e.g. "claude_code:주간"):
+    /// (reset id, highest threshold already notified). Re-arms when the
+    /// window's reset id changes. In-memory — a restart may re-notify once.
+    alert_state: HashMap<String, (String, u8)>,
     /// Logged-in account per source (read once from local auth files).
     claude_account: Option<String>,
     codex_account: Option<String>,
@@ -126,6 +128,15 @@ pub struct DevicesData {
     /// False when no sync folder is configured (only the current device shown).
     pub sync_enabled: bool,
     pub devices: Vec<DeviceSummary>,
+}
+
+/// Number of days in the given calendar month.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    NaiveDate::from_ymd_opt(ny, nm, 1)
+        .and_then(|d| d.pred_opt())
+        .map(|d| d.day())
+        .unwrap_or(30)
 }
 
 /// Everything the popover card needs for one source of one device, computed
@@ -259,6 +270,33 @@ pub struct DeviceRangeUsage {
     pub cost_usd: Option<f64>,
 }
 
+/// Per-project token/cost total over the selected dashboard range. The
+/// per-source token split drives the stacked (Claude/Codex) bar.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectUsage {
+    pub project: String,
+    pub tokens: TokenBreakdown,
+    pub cost_usd: Option<f64>,
+    pub claude_tokens: u64,
+    pub codex_tokens: u64,
+}
+
+/// This calendar month's usage so far plus a linear month-end projection.
+/// Independent of the dashboard range (always the current month); scoped like
+/// the rest of the dashboard (local / all / host).
+#[derive(Debug, Clone, Serialize)]
+pub struct MonthUsage {
+    pub tokens: u64,
+    pub cost_usd: Option<f64>,
+    /// Linear extrapolation to month end: tokens / days_elapsed * days_in_month.
+    pub projected_tokens: u64,
+    pub projected_cost_usd: Option<f64>,
+    pub days_elapsed: u32,
+    pub days_in_month: u32,
+    /// Configured monthly token budget, if any.
+    pub budget_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardData {
     pub range: String,
@@ -267,6 +305,10 @@ pub struct DashboardData {
     /// Per-host totals for the range — only populated in the combined ("all")
     /// scope; empty for the local view.
     pub devices: Vec<DeviceRangeUsage>,
+    /// Per-project totals for the range (across sources), highest first.
+    pub projects: Vec<ProjectUsage>,
+    /// This month's usage + projection (independent of `range`).
+    pub month: MonthUsage,
 }
 
 impl Engine {
@@ -288,7 +330,7 @@ impl Engine {
             cache_path,
             cache,
             runtimes,
-            notified_limit: None,
+            alert_state: HashMap::new(),
             claude_account: crate::accounts::claude_account(),
             codex_account: crate::accounts::codex_account(),
         }
@@ -653,6 +695,69 @@ impl Engine {
             }
         }
         rows.sort_by(|a, b| a.period.cmp(&b.period));
+
+        // Per-project totals over the range (across sources). Buckets with no
+        // project (pre-project data) fold into "(기타)".
+        let mut by_project: HashMap<String, ProjectUsage> = HashMap::new();
+        for b in &buckets {
+            if b.date < start {
+                continue;
+            }
+            let name = b.project.clone().unwrap_or_else(|| "(기타)".to_string());
+            let pu = by_project.entry(name.clone()).or_insert_with(|| ProjectUsage {
+                project: name,
+                tokens: TokenBreakdown {
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_creation: 0,
+                    total: 0,
+                },
+                cost_usd: None,
+                claude_tokens: 0,
+                codex_tokens: 0,
+            });
+            pu.tokens.input += b.input;
+            pu.tokens.output += b.output;
+            pu.tokens.cache_read += b.cache_read;
+            pu.tokens.cache_creation += b.cache_creation;
+            pu.tokens.total += b.total();
+            match b.source {
+                SourceId::ClaudeCode => pu.claude_tokens += b.total(),
+                SourceId::Codex => pu.codex_tokens += b.total(),
+            }
+            if let Some(c) = b.cost_usd() {
+                *pu.cost_usd.get_or_insert(0.0) += c;
+            }
+        }
+        let mut projects: Vec<ProjectUsage> = by_project.into_values().collect();
+        projects.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total));
+
+        // This calendar month + linear month-end projection (scope-aware).
+        let (y, mo) = (today.year(), today.month());
+        let days_in_month = days_in_month(y, mo);
+        let days_elapsed = today.day().max(1);
+        let mut m_tokens: u64 = 0;
+        let mut m_cost: Option<f64> = None;
+        for b in &buckets {
+            if b.date.year() == y && b.date.month() == mo {
+                m_tokens += b.total();
+                if let Some(c) = b.cost_usd() {
+                    *m_cost.get_or_insert(0.0) += c;
+                }
+            }
+        }
+        let scale = days_in_month as f64 / days_elapsed as f64;
+        let month = MonthUsage {
+            tokens: m_tokens,
+            cost_usd: m_cost,
+            projected_tokens: (m_tokens as f64 * scale) as u64,
+            projected_cost_usd: m_cost.map(|c| c * scale),
+            days_elapsed,
+            days_in_month,
+            budget_tokens: self.cache.monthly_budget_tokens,
+        };
+
         DashboardData {
             range: range.to_string(),
             rows,
@@ -661,6 +766,8 @@ impl Engine {
                 Local::now().format("%Z")
             ),
             devices,
+            projects,
+            month,
         }
     }
 
@@ -738,46 +845,124 @@ impl Engine {
     }
 }
 
-/// Limit thresholds that trigger a macOS notification (measured sources).
-const LIMIT_THRESHOLDS: [u8; 2] = [95, 80];
+/// Plan-usage thresholds that trigger a notification, ascending.
+const LIMIT_THRESHOLDS: [u8; 4] = [30, 50, 70, 90];
+
+/// Highest threshold `percent` newly crosses given the highest already
+/// notified for this window (`prior_max`). Returns `None` when nothing new
+/// crossed — so climbing within a band (e.g. 72→75%) stays silent.
+fn threshold_crossing(prior_max: u8, percent: f64) -> Option<u8> {
+    let crossed = LIMIT_THRESHOLDS
+        .iter()
+        .rev()
+        .copied()
+        .find(|t| percent >= *t as f64)?;
+    (crossed > prior_max).then_some(crossed)
+}
+
+/// Korean window label from a Codex window length (mirrors `windowLabel` in
+/// format.ts): 300m → 세션, 10080m → 주간, else "N분".
+fn window_label_kr(minutes: u64) -> String {
+    match minutes {
+        300 => "세션".into(),
+        10080 => "주간".into(),
+        m => format!("{m}분"),
+    }
+}
+
+/// One limit gauge to watch for threshold crossings.
+struct Gauge {
+    /// Stable per-window key (source + window) for dedup.
+    key: String,
+    /// Human window label (세션 / 주간 / 주간·Fable).
+    label: String,
+    percent: f64,
+    /// Changes when the window resets → re-arms the alert.
+    reset_id: String,
+    /// Human reset time for the notification body, if known.
+    reset_hint: Option<String>,
+}
+
+/// Flatten a source's rate limit into the gauges to watch. Covers both the
+/// Claude `/usage` (Cli) windows and the Codex app-server (Measured) windows.
+fn gauges(s: &SourceSummary) -> Vec<Gauge> {
+    let sid = s.id.as_str();
+    match &s.rate_limit {
+        RateLimitStatus::Cli { windows, .. } => windows
+            .iter()
+            .map(|w| Gauge {
+                key: format!("{sid}:{}", w.label),
+                label: if w.label == "all models" {
+                    "주간".into()
+                } else {
+                    format!("주간·{}", w.label)
+                },
+                percent: w.used_percent,
+                reset_id: w.resets_label.clone().unwrap_or_default(),
+                reset_hint: w.resets_label.clone(),
+            })
+            .collect(),
+        RateLimitStatus::Measured {
+            primary_used_percent,
+            secondary_used_percent,
+            window_minutes,
+            resets_at,
+            secondary_resets_at,
+        } => {
+            let fmt = |r: &chrono::DateTime<Utc>| r.with_timezone(&Local).format("%m/%d %H:%M").to_string();
+            let mut g = vec![Gauge {
+                key: format!("{sid}:primary"),
+                label: window_label_kr(*window_minutes),
+                percent: *primary_used_percent,
+                reset_id: resets_at.timestamp().to_string(),
+                reset_hint: Some(fmt(resets_at)),
+            }];
+            if let Some(sp) = secondary_used_percent {
+                g.push(Gauge {
+                    key: format!("{sid}:secondary"),
+                    label: "주간".into(),
+                    percent: *sp,
+                    reset_id: secondary_resets_at.map(|r| r.timestamp().to_string()).unwrap_or_default(),
+                    reset_hint: secondary_resets_at.as_ref().map(fmt),
+                });
+            }
+            g
+        }
+        _ => vec![],
+    }
+}
 
 impl Engine {
-    /// Returns (title, body) when a measured limit crossed a threshold not
-    /// yet notified for this window. Windows roll over via resets_at.
-    pub fn limit_notification(&mut self, summary: &Summary) -> Option<(String, String)> {
+    /// (title, body) for every gauge that just crossed a threshold not yet
+    /// notified for its current window. Each window notifies once per threshold
+    /// per reset period; it re-arms when the window rolls over.
+    pub fn limit_notification(&mut self, summary: &Summary) -> Vec<(String, String)> {
+        let mut out = Vec::new();
         for s in &summary.sources {
-            let RateLimitStatus::Measured {
-                primary_used_percent,
-                secondary_used_percent,
-                resets_at,
-                ..
-            } = &s.rate_limit
-            else {
-                continue;
-            };
-            let pct = primary_used_percent.max(secondary_used_percent.unwrap_or(0.0));
-            // New window → forget the old notification.
-            if self
-                .notified_limit
-                .is_some_and(|(_, r)| r != *resets_at)
-            {
-                self.notified_limit = None;
+            for g in gauges(s) {
+                let entry = self
+                    .alert_state
+                    .entry(g.key.clone())
+                    .or_insert_with(|| (g.reset_id.clone(), 0));
+                // Window rolled over → forget past notifications for it.
+                if entry.0 != g.reset_id {
+                    *entry = (g.reset_id.clone(), 0);
+                }
+                let Some(crossed) = threshold_crossing(entry.1, g.percent) else {
+                    continue;
+                };
+                entry.1 = crossed;
+                let body = match &g.reset_hint {
+                    Some(r) => format!("{crossed}% 임계값을 넘었습니다 · 리셋 {r}"),
+                    None => format!("{crossed}% 임계값을 넘었습니다"),
+                };
+                out.push((
+                    format!("{} · {} {:.0}%", s.display_name, g.label, g.percent),
+                    body,
+                ));
             }
-            let crossed = LIMIT_THRESHOLDS.iter().copied().find(|t| pct >= *t as f64)?;
-            let already = self
-                .notified_limit
-                .is_some_and(|(t, _)| t >= crossed);
-            if already {
-                continue;
-            }
-            self.notified_limit = Some((crossed, *resets_at));
-            let local_reset = resets_at.with_timezone(&Local).format("%H:%M");
-            return Some((
-                format!("{} 한도 {:.0}% 사용", s.display_name, pct),
-                format!("사용량이 {crossed}% 임계값을 넘었습니다. 리셋: {local_reset} (로그 기준)"),
-            ));
         }
-        None
+        out
     }
 }
 
@@ -815,13 +1000,18 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
 pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
     use tauri_plugin_notification::NotificationExt;
     let state = app.state::<AppState>();
-    let (summary, notification) = {
+    let (summary, notifications) = {
         let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         let summary = engine.refresh();
-        let notification = engine.limit_notification(&summary);
-        (summary, notification)
+        // Alerts on by default; the Settings toggle can silence them.
+        let notifications = if engine.cache.alerts_enabled.unwrap_or(true) {
+            engine.limit_notification(&summary)
+        } else {
+            Vec::new()
+        };
+        (summary, notifications)
     };
-    if let Some((title, body)) = notification {
+    for (title, body) in notifications {
         let _ = app
             .notification()
             .builder()
@@ -829,6 +1019,14 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .body(body)
             .show();
     }
+    publish_tray_and_emit(app, &summary);
+    Some(summary)
+}
+
+/// Rebuild the tray rotation from a summary and emit `usage-updated`. Shared by
+/// the full refresh and the lightweight `republish`; does NOT rescan.
+fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
+    let state = app.state::<AppState>();
     let (display, devices) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -868,8 +1066,19 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
     };
     apply_tray_title(app, &snapshot);
 
-    let _ = app.emit("usage-updated", &summary);
-    Some(summary)
+    let _ = app.emit("usage-updated", summary);
+}
+
+/// Re-emit the current summary + rebuild the tray WITHOUT rescanning — for
+/// display-only setting changes (tray mode, date format) that don't need fresh
+/// data. Much cheaper than `refresh_and_publish` (no file scan, no CLI calls).
+pub fn republish(app: &AppHandle) {
+    let summary = {
+        let state = app.state::<AppState>();
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.summary()
+    };
+    publish_tray_and_emit(app, &summary);
 }
 
 /// Change the tray display mode ("tokens"|"cost"|"icon"), persist, refresh.
@@ -881,10 +1090,42 @@ pub fn set_tray_display(app: &AppHandle, mode: &str) {
         let path = engine.cache_path.clone();
         let _ = cache::save(&path, &engine.cache);
     }
+    // Display-only change → cheap republish (no rescan).
     let app = app.clone();
-    std::thread::spawn(move || {
-        let _ = refresh_and_publish(&app);
-    });
+    std::thread::spawn(move || republish(&app));
+}
+
+/// Toggle plan-usage threshold notifications and persist.
+pub fn set_alerts_enabled(app: &AppHandle, enabled: bool) {
+    let state = app.state::<AppState>();
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.alerts_enabled = Some(enabled);
+    let path = engine.cache_path.clone();
+    let _ = cache::save(&path, &engine.cache);
+}
+
+/// Set (or clear with `None`) the monthly token budget and persist.
+pub fn set_monthly_budget(app: &AppHandle, tokens: Option<u64>) {
+    let state = app.state::<AppState>();
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.monthly_budget_tokens = tokens;
+    let path = engine.cache_path.clone();
+    let _ = cache::save(&path, &engine.cache);
+}
+
+/// Set the date-format preference, persist, then refresh so open windows
+/// (the popover) re-read it via the usage-updated event and re-render.
+pub fn set_date_format(app: &AppHandle, format: String) {
+    {
+        let state = app.state::<AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.date_format = Some(format);
+        let path = engine.cache_path.clone();
+        let _ = cache::save(&path, &engine.cache);
+    }
+    // Display-only change → cheap republish (no rescan).
+    let app = app.clone();
+    std::thread::spawn(move || republish(&app));
 }
 
 /// Set (or clear with `None`) the multi-device sync folder, persist, then
@@ -954,11 +1195,20 @@ fn watch_loop(app: AppHandle) {
 
     let mut watched = 0u32;
     for entry in sources::registry() {
-        if watcher
-            .watch(&entry.root_path, RecursiveMode::Recursive)
-            .is_ok()
-        {
-            watched += 1;
+        // Watch the narrow log dirs when a source declares them, else the root.
+        let targets: Vec<PathBuf> = if entry.watch_subdirs.is_empty() {
+            vec![entry.root_path.clone()]
+        } else {
+            entry
+                .watch_subdirs
+                .iter()
+                .map(|sub| entry.root_path.join(sub))
+                .collect()
+        };
+        for target in targets {
+            if watcher.watch(&target, RecursiveMode::Recursive).is_ok() {
+                watched += 1;
+            }
         }
     }
     if watched == 0 {
@@ -987,5 +1237,90 @@ fn watch_loop(app: AppHandle) {
             }
         }
         let _ = refresh_and_publish(&app);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::UsageWindow;
+    use chrono::TimeZone;
+
+    #[test]
+    fn threshold_crossing_fires_highest_band_once() {
+        // Nothing below 30%.
+        assert_eq!(threshold_crossing(0, 0.0), None);
+        assert_eq!(threshold_crossing(0, 29.9), None);
+        // First crossing fires the highest band reached.
+        assert_eq!(threshold_crossing(0, 30.0), Some(30));
+        assert_eq!(threshold_crossing(0, 75.0), Some(70));
+        // Climbing within/under the last band stays silent.
+        assert_eq!(threshold_crossing(70, 71.0), None);
+        assert_eq!(threshold_crossing(70, 89.9), None);
+        // Crossing into a higher band fires again.
+        assert_eq!(threshold_crossing(70, 92.0), Some(90));
+        assert_eq!(threshold_crossing(90, 100.0), None);
+    }
+
+    fn source(id: SourceId, rate_limit: RateLimitStatus) -> SourceSummary {
+        SourceSummary {
+            id,
+            display_name: id.as_str().to_string(),
+            health: SourceHealth::Ok,
+            today_tokens: TokenBreakdown {
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_creation: 0,
+                total: 0,
+            },
+            today_cost_usd: None,
+            today_cache_saved_usd: None,
+            rate_limit,
+            last7_totals: vec![],
+            account: None,
+        }
+    }
+
+    #[test]
+    fn gauges_cover_claude_cli_and_codex_measured() {
+        let claude = source(
+            SourceId::ClaudeCode,
+            RateLimitStatus::Cli {
+                session_percent: Some(0.0),
+                windows: vec![
+                    UsageWindow {
+                        label: "all models".into(),
+                        used_percent: 72.0,
+                        resets_label: Some("Jul 19 at 9pm".into()),
+                    },
+                    UsageWindow {
+                        label: "Fable".into(),
+                        used_percent: 10.0,
+                        resets_label: None,
+                    },
+                ],
+            },
+        );
+        let g = gauges(&claude);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0].label, "주간");
+        assert_eq!(g[0].percent, 72.0);
+        assert_eq!(g[1].label, "주간·Fable");
+
+        let codex = source(
+            SourceId::Codex,
+            RateLimitStatus::Measured {
+                primary_used_percent: 3.0,
+                secondary_used_percent: None,
+                window_minutes: 10080,
+                resets_at: Utc.timestamp_opt(1_784_681_127, 0).unwrap(),
+                secondary_resets_at: None,
+            },
+        );
+        let cg = gauges(&codex);
+        assert_eq!(cg.len(), 1);
+        assert_eq!(cg[0].label, "주간");
+        assert_eq!(cg[0].percent, 3.0);
     }
 }

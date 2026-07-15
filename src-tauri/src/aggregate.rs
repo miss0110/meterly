@@ -16,12 +16,16 @@ pub const CLAUDE_WINDOW_HOURS: i64 = 5;
 /// Recent-events retention for the rolling window (> window, small margin).
 pub const RECENT_RETENTION_HOURS: i64 = 6;
 
-/// One (date, source, model) daily bucket — the cache's `daily` rows.
+/// One (date, source, model, project) daily bucket — the cache's `daily` rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DailyBucket {
     pub date: NaiveDate,
     pub source: SourceId,
     pub model: Option<String>,
+    /// Project (basename of the session cwd) this usage belongs to. `None` for
+    /// pre-project caches/logs. Defaulted so older cache files deserialize.
+    #[serde(default)]
+    pub project: Option<String>,
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
@@ -120,9 +124,12 @@ pub fn ingest(buckets: &mut Vec<DailyBucket>, events: &[UsageEvent], window_star
         if date < window_start {
             continue;
         }
-        let found = buckets
-            .iter_mut()
-            .find(|b| b.date == date && b.source == ev.source && b.model == ev.model);
+        let found = buckets.iter_mut().find(|b| {
+            b.date == date
+                && b.source == ev.source
+                && b.model == ev.model
+                && b.project == ev.project
+        });
         let bucket = match found {
             Some(b) => b,
             None => {
@@ -130,6 +137,7 @@ pub fn ingest(buckets: &mut Vec<DailyBucket>, events: &[UsageEvent], window_star
                     date,
                     source: ev.source,
                     model: ev.model.clone(),
+                    project: ev.project.clone(),
                     input: 0,
                     output: 0,
                     cache_read: 0,
@@ -228,6 +236,7 @@ mod tests {
             dedup_key: None,
             timestamp: now - Duration::hours(hours_ago),
             model: None,
+            project: None,
             input_tokens: tokens,
             output_tokens: 0,
             cache_read_tokens: 0,

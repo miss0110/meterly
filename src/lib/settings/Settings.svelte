@@ -4,6 +4,9 @@
     getSettings,
     setTrayDisplay,
     setAutostart,
+    setAlertsEnabled,
+    setMonthlyBudget,
+    setDateFormat,
     pickSyncFolder,
     clearSyncFolder,
     checkForUpdates,
@@ -21,14 +24,39 @@
     { id: "icon", label: "아이콘만" },
   ];
 
-  async function chooseDisplay(mode: string) {
-    await setTrayDisplay(mode);
+  // Update the control immediately (optimistic), persist in the background —
+  // the UI shouldn't wait on the IPC round-trip to reflect the choice.
+  function chooseDisplay(mode: string) {
     if (s) s.tray_display = mode;
+    void setTrayDisplay(mode);
   }
-  async function toggleAutostart(e: Event) {
+  function toggleAutostart(e: Event) {
     const enabled = (e.currentTarget as HTMLInputElement).checked;
-    await setAutostart(enabled);
     if (s) s.autostart = enabled;
+    void setAutostart(enabled);
+  }
+  function toggleAlerts(e: Event) {
+    const enabled = (e.currentTarget as HTMLInputElement).checked;
+    if (s) s.alerts_enabled = enabled;
+    void setAlertsEnabled(enabled);
+  }
+  const DATE_FORMATS = [
+    { id: "auto", label: "자동 (지역 표준)" },
+    { id: "iso", label: "2026-07-19 20:59" },
+    { id: "us", label: "7/19 8:59 PM" },
+    { id: "eu", label: "19/7 20:59" },
+  ];
+  function chooseDateFormat(e: Event) {
+    const fmt = (e.currentTarget as HTMLSelectElement).value;
+    if (s) s.date_format = fmt;
+    void setDateFormat(fmt);
+  }
+  // Budget is entered/shown in millions of tokens; stored as raw tokens.
+  function saveBudget(e: Event) {
+    const m = parseFloat((e.currentTarget as HTMLInputElement).value);
+    const tokens = Number.isFinite(m) && m > 0 ? Math.round(m * 1_000_000) : 0;
+    if (s) s.monthly_budget_tokens = tokens > 0 ? tokens : null;
+    void setMonthlyBudget(tokens);
   }
   async function pick() {
     const p = await pickSyncFolder();
@@ -68,6 +96,37 @@
       <label class="row-toggle">
         <input type="checkbox" checked={s.autostart} onchange={toggleAutostart} />
         로그인 시 자동 시작
+      </label>
+      <label class="row-toggle">
+        <input type="checkbox" checked={s.alerts_enabled} onchange={toggleAlerts} />
+        한도 사용률 알림 (30 · 50 · 70 · 90%)
+      </label>
+      <label class="row-select">
+        날짜 표시 형식
+        <select value={s.date_format} onchange={chooseDateFormat}>
+          {#each DATE_FORMATS as f}
+            <option value={f.id}>{f.label}</option>
+          {/each}
+        </select>
+      </label>
+    </section>
+
+    <section>
+      <h2>월 토큰 예산</h2>
+      <p class="muted small">
+        이번 달 사용량과 월말 예상치를 대시보드에서 이 예산과 비교합니다. 비우면 예산 없이
+        사용량·예상치만 표시합니다.
+      </p>
+      <label class="budget">
+        <input
+          type="number"
+          min="0"
+          step="10"
+          placeholder="예: 500"
+          value={s.monthly_budget_tokens ? s.monthly_budget_tokens / 1_000_000 : ""}
+          onchange={saveBudget}
+        />
+        <span class="unit">M tok / 월</span>
       </label>
     </section>
 
@@ -136,6 +195,22 @@
     gap: 0.5rem;
     cursor: pointer;
   }
+  .row-select {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+  }
+  .row-select select {
+    font: inherit;
+    font-size: 0.85rem;
+    padding: 0.25rem 0.4rem;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    color: inherit;
+    cursor: pointer;
+  }
   .muted {
     color: color-mix(in srgb, CanvasText 55%, transparent);
   }
@@ -174,5 +249,23 @@
   }
   .ver {
     font-size: 0.78rem;
+  }
+  .budget {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .budget input {
+    width: 7rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    color: inherit;
+    font-size: 0.85rem;
+  }
+  .budget .unit {
+    font-size: 0.8rem;
+    color: color-mix(in srgb, CanvasText 55%, transparent);
   }
 </style>

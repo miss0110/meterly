@@ -209,6 +209,50 @@
     </section>
   {/if}
 
+  {#if data}
+    {@const mo = data.month}
+    {@const usedPct = mo.budget_tokens ? (mo.tokens / mo.budget_tokens) * 100 : 0}
+    {@const projPct = mo.budget_tokens ? (mo.projected_tokens / mo.budget_tokens) * 100 : 0}
+    <section class="chart-block">
+      <h2>이번 달 <span class="muted">({mo.days_elapsed}/{mo.days_in_month}일)</span></h2>
+      <div class="month-stats">
+        <div class="ms">
+          <span class="ms-label muted">사용</span>
+          <span class="ms-val">{formatTokens(mo.tokens)} tok</span>
+          {#if mo.cost_usd !== null}<span class="ms-sub muted">{formatCost(mo.cost_usd)}</span>{/if}
+        </div>
+        <div class="ms">
+          <span class="ms-label muted">월말 예상</span>
+          <span class="ms-val">{formatTokens(mo.projected_tokens)} tok</span>
+          {#if mo.projected_cost_usd !== null}
+            <span class="ms-sub muted">{formatCost(mo.projected_cost_usd)}</span>
+          {/if}
+        </div>
+        {#if mo.budget_tokens}
+          <div class="ms">
+            <span class="ms-label muted">월 예산</span>
+            <span class="ms-val">{formatTokens(mo.budget_tokens)} tok</span>
+          </div>
+        {/if}
+      </div>
+      {#if mo.budget_tokens}
+        <div class="budget-bar">
+          <span
+            class="budget-fill"
+            class:over={usedPct > 100}
+            style={`width:${Math.min(100, usedPct)}%`}
+          ></span>
+          <span class="budget-proj" style={`left:${Math.min(100, projPct)}%`}></span>
+        </div>
+        <div class="muted small">
+          예산의 {usedPct.toFixed(0)}% 사용 · 월말 예상 {projPct.toFixed(0)}%{projPct > 100
+            ? " — 예산 초과 예상 ⚠"
+            : ""}
+        </div>
+      {/if}
+    </section>
+  {/if}
+
   {#if scope === "all" && data && data.devices.length}
     <section class="chart-block">
       <h2>기기별 <span class="muted">(기간 합계)</span></h2>
@@ -225,6 +269,43 @@
             </span>
           </div>
         {/each}
+      </div>
+    </section>
+  {/if}
+
+  {#if data && data.projects.length}
+    {@const projMax = data.projects[0]?.tokens.total || 1}
+    <section class="chart-block">
+      <h2>프로젝트별 <span class="muted">(기간 합계)</span></h2>
+      <div class="proj-legend muted">
+        <span><span class="lg-dot" style={`background:${t.sources.claude_code}`}></span>Claude Code</span>
+        <span><span class="lg-dot" style={`background:${t.sources.codex}`}></span>Codex</span>
+      </div>
+      <div class="projects">
+        {#each data.projects.slice(0, 15) as p (p.project)}
+          <div class="proj-row">
+            <span class="proj-name" title={p.project}>{p.project}</span>
+            <span class="proj-bar">
+              <span
+                class="proj-fill"
+                style={`width:${(p.claude_tokens / projMax) * 100}%;background:${t.sources.claude_code}`}
+                title="Claude Code {formatTokens(p.claude_tokens)} tok"
+              ></span>
+              <span
+                class="proj-fill"
+                style={`width:${(p.codex_tokens / projMax) * 100}%;background:${t.sources.codex}`}
+                title="Codex {formatTokens(p.codex_tokens)} tok"
+              ></span>
+            </span>
+            <span class="proj-tok">{formatTokens(p.tokens.total)} tok</span>
+            <span class="proj-cost muted">
+              {p.cost_usd === null ? LABEL_COST_NA : formatCost(p.cost_usd)}
+            </span>
+          </div>
+        {/each}
+        {#if data.projects.length > 15}
+          <div class="muted small">그 외 {data.projects.length - 15}개 프로젝트</div>
+        {/if}
       </div>
     </section>
   {/if}
@@ -278,10 +359,10 @@
 
 <style>
   .dashboard {
-    padding: 1rem 1.25rem;
+    padding: 1.25rem 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 1.5rem;
     box-sizing: border-box;
     height: 100%;
     overflow-y: auto;
@@ -296,8 +377,11 @@
     margin: 0;
   }
   h2 {
-    font-size: 0.85rem;
-    margin: 0 0 0.4rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin: 0 0 0.75rem;
+    color: color-mix(in srgb, CanvasText 62%, transparent);
   }
   nav {
     display: flex;
@@ -407,6 +491,10 @@
   }
   .chart-block {
     min-width: 0;
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 12px;
+    padding: 1rem 1.15rem;
+    background: color-mix(in srgb, CanvasText 3%, transparent);
   }
   .chart-wrap {
     position: relative;
@@ -459,6 +547,108 @@
   .dev-cost,
   .dev-when {
     font-size: 0.75rem;
+  }
+  .month-stats {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+  .ms {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .ms-label {
+    font-size: 0.72rem;
+  }
+  .ms-val {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+  .ms-sub {
+    font-size: 0.75rem;
+  }
+  .budget-bar {
+    position: relative;
+    height: 10px;
+    border-radius: 5px;
+    background: rgba(128, 128, 128, 0.18);
+    overflow: hidden;
+    margin-top: 0.5rem;
+  }
+  .budget-fill {
+    display: block;
+    height: 100%;
+    border-radius: 5px;
+    background: #4f8ef7;
+  }
+  .budget-fill.over {
+    background: #e0524f;
+  }
+  /* Month-end projection marker — a tick on the budget bar. */
+  .budget-proj {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: color-mix(in srgb, CanvasText 75%, transparent);
+    transform: translateX(-1px);
+  }
+  .projects {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .proj-row {
+    display: grid;
+    grid-template-columns: minmax(6rem, 1.4fr) 3fr auto auto;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.3rem 0.1rem;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+  }
+  .proj-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .proj-bar {
+    display: flex;
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.18);
+    overflow: hidden;
+  }
+  .proj-fill {
+    height: 100%;
+  }
+  .proj-legend {
+    display: flex;
+    gap: 0.9rem;
+    margin-bottom: 0.6rem;
+    font-size: 0.72rem;
+  }
+  .proj-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+  }
+  .lg-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+  .proj-tok {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    text-align: right;
+  }
+  .proj-cost {
+    font-size: 0.75rem;
+    text-align: right;
   }
   .heatmap {
     display: grid;

@@ -3,6 +3,7 @@
   import {
     getSummary,
     getDevices,
+    getSettings,
     refreshNow,
     openDashboard,
     onUsageUpdated,
@@ -17,7 +18,9 @@
     formatTokens,
     formatCost,
     formatResetTime,
+    formatResetLabel,
     windowLabel,
+    type DateFormat,
     LABEL_ESTIMATED,
     LABEL_MEASURED,
     LABEL_CLI,
@@ -34,19 +37,29 @@
   // "all" | "__local" (this machine) | a device_id (a specific host).
   let view = $state<string>("__local");
   let refreshing = $state(false);
+  // Date-format preference (Settings). Re-read on each refresh so a change in
+  // the Settings window applies without an app restart.
+  let dateFmt = $state<DateFormat>("auto");
 
   function loadDevices() {
     getDevices()
       .then((d) => (devices = d))
       .catch(() => {});
   }
+  function loadDateFmt() {
+    getSettings()
+      .then((s) => (dateFmt = (s.date_format as DateFormat) ?? "auto"))
+      .catch(() => {});
+  }
 
   onMount(() => {
     getSummary().then((s) => (summary = s));
     loadDevices();
+    loadDateFmt();
     const unlisten = onUsageUpdated((s) => {
       summary = s;
       loadDevices();
+      loadDateFmt();
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -184,7 +197,7 @@
         rows.push({
           label: w.label === "all models" ? "주간" : `주간·${w.label}`,
           percent: w.used_percent,
-          reset: w.resets_label,
+          reset: formatResetLabel(w.resets_label, dateFmt),
         });
       }
       return { badge: LABEL_CLI, rows };
@@ -196,14 +209,14 @@
       {
         label: windowLabel(m.window_minutes),
         percent: m.primary_used_percent,
-        reset: formatResetTime(m.resets_at),
+        reset: formatResetTime(m.resets_at, dateFmt),
       },
     ];
     if (m.secondary_used_percent !== null) {
       rows.push({
         label: "주간",
         percent: m.secondary_used_percent,
-        reset: m.secondary_resets_at ? formatResetTime(m.secondary_resets_at) : null,
+        reset: m.secondary_resets_at ? formatResetTime(m.secondary_resets_at, dateFmt) : null,
       });
     }
     return { badge: LABEL_MEASURED, rows };
@@ -293,7 +306,7 @@
                 <b class="badge">{LABEL_ESTIMATED}</b>
                 {s.rate_limit.estimated.window_hours}시간 창
                 {formatTokens(s.rate_limit.estimated.window_tokens)} tok ·
-                리셋 {formatResetTime(s.rate_limit.estimated.resets_at)}
+                리셋 {formatResetTime(s.rate_limit.estimated.resets_at, dateFmt)}
               </span>
             {:else}
               {@const uv = usageView(s.rate_limit)}

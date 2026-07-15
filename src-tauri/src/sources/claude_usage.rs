@@ -55,8 +55,12 @@ pub fn fetch() -> RateLimitStatus {
     let Some(bin) = claude_binary() else {
         return RateLimitStatus::Unavailable;
     };
+    // Run in a neutral temp cwd: a Finder-launched app inherits cwd `/`, and
+    // we don't want `claude` treating the user's folders as a project (which
+    // can trigger macOS folder-permission prompts). `/usage` needs no project.
     let mut child = match Command::new(bin)
         .args(["-p", "/usage"])
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
