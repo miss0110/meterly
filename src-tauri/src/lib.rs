@@ -238,9 +238,9 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-            // Closing the dashboard must HIDE it, not destroy it —
-            // a destroyed window can never be reopened from the tray.
-            if window.label() == "dashboard" {
+            // Closing the dashboard/settings must HIDE, not destroy — a
+            // destroyed window can never be reopened from the tray.
+            if window.label() == "dashboard" || window.label() == "settings" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
