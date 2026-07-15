@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod aggregate;
 pub mod cache;
 pub mod commands;
@@ -136,6 +137,9 @@ pub fn run() {
         .manage(scheduler::AppState(std::sync::Mutex::new(
             scheduler::Engine::new(),
         )))
+        .manage(scheduler::TrayRotation(std::sync::Mutex::new(
+            Default::default(),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::get_summary,
             commands::get_dashboard,
@@ -235,9 +239,9 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-            // Closing the dashboard must HIDE it, not destroy it —
-            // a destroyed window can never be reopened from the tray.
-            if window.label() == "dashboard" {
+            // Closing the dashboard/settings must HIDE, not destroy — a
+            // destroyed window can never be reopened from the tray.
+            if window.label() == "dashboard" || window.label() == "settings" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();

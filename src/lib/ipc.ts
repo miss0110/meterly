@@ -61,6 +61,8 @@ export interface SourceSummary {
   rate_limit: RateLimitStatus;
   /** Daily totals, oldest → today (7 entries) — sparklines. */
   last7_totals: number[];
+  /** Logged-in account this source measures (e.g. "email · Team"). */
+  account: string | null;
 }
 
 export interface Summary {
@@ -73,6 +75,10 @@ export interface DeviceSourceUsage {
   display_name: string;
   today_tokens: TokenBreakdown;
   today_cost_usd: number | null;
+  /** USD saved today by cache reads (known models) — 전체/host views. */
+  today_cache_saved_usd: number | null;
+  /** Daily totals, oldest → today (7 entries) — sparkline. */
+  last7_totals: number[];
 }
 
 export interface DeviceSummary {

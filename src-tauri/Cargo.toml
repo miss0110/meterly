@@ -1,6 +1,6 @@
 [package]
 name = "meterly"
-version = "0.1.6"
+version = "0.1.7"
 description = "macOS menu bar app for local AI CLI usage tracking"
 authors = ["Jay"]
 edition = "2021"
@@ -29,3 +29,4 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 notify = "6"
+base64 = "0.22"

@@ -16,13 +16,31 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::aggregate::{self, DailyBucket};
 use crate::cache::{self, CacheV1};
 use crate::model::{RateLimitStatus, SourceHealth, SourceId};
-use crate::sources::{self, RecentEvents, SourceCursors, UsageSource};
+use crate::sources::{self, SourceCursors, UsageSource};
 
 pub const REFRESH_INTERVAL_SECS: u64 = 180;
 
 /// Minimum gap between `claude -p "/usage"` shell-outs. The call spawns a
 /// process (~seconds), so it is throttled independently of the scan cycle.
 pub const CLAUDE_USAGE_MIN_INTERVAL_SECS: i64 = 120;
+
+/// Minimum gap between `codex app-server` reads (real Codex plan usage). Same
+/// rationale as the Claude one — it spawns a process, so throttle it.
+pub const CODEX_USAGE_MIN_INTERVAL_SECS: i64 = 120;
+
+/// Seconds between tray-title rotations (전체 ↔ 이 기기) when 2+ devices sync.
+pub const TRAY_ROTATE_SECS: u64 = 5;
+
+/// Latest tray-title states + rotation position (managed Tauri state). The menu
+/// bar is narrow, so instead of showing everything at once we cycle through a
+/// list of labeled totals (이 기기/전체 × 토큰/비용) every [`TRAY_ROTATE_SECS`].
+#[derive(Default, Clone)]
+pub struct TrayInfo {
+    /// Labeled titles to rotate through; empty = icon mode (no title).
+    pub states: Vec<String>,
+    pub idx: usize,
+}
+pub struct TrayRotation(pub Mutex<TrayInfo>);
 
 pub struct AppState(pub Mutex<Engine>);
 
@@ -33,6 +51,9 @@ pub struct Engine {
     /// Limit-notification dedup: (threshold %, window resets_at) already
     /// notified for. Cleared when the window rolls over or usage drops.
     notified_limit: Option<(u8, chrono::DateTime<Utc>)>,
+    /// Logged-in account per source (read once from local auth files).
+    claude_account: Option<String>,
+    codex_account: Option<String>,
 }
 
 struct Runtime {
@@ -65,6 +86,8 @@ pub struct SourceSummary {
     /// Daily totals for the last 7 days (oldest → today) — popover/card
     /// sparklines.
     pub last7_totals: Vec<u64>,
+    /// Logged-in account this source measures (e.g. "email · Team"), if known.
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +104,11 @@ pub struct DeviceSourceUsage {
     pub display_name: String,
     pub today_tokens: TokenBreakdown,
     pub today_cost_usd: Option<f64>,
+    /// USD saved today by cache reads vs full input rate (known models) — so
+    /// the 전체/host views can show the same "캐시로 …절약" line as 이 기기.
+    pub today_cache_saved_usd: Option<f64>,
+    /// Daily totals, oldest → today (7 entries) for the card sparkline.
+    pub last7_totals: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,13 +128,19 @@ pub struct DevicesData {
     pub devices: Vec<DeviceSummary>,
 }
 
-/// Sum a source's tokens + cost for one day from any bucket iterator (local
-/// in-memory buckets or a synced device file). Cost is recomputed via pricing.
-fn day_usage<'a>(
-    buckets: impl Iterator<Item = &'a DailyBucket>,
+/// Everything the popover card needs for one source of one device, computed
+/// from that device's daily buckets (local in-memory or a synced file): today's
+/// tokens/cost/cache-savings plus the 7-day daily totals (oldest→today) for the
+/// sparkline. Computing all of it here — not just today's tokens — lets the
+/// 전체/host views render identically to 이 기기 instead of dropping the
+/// sparkline and cache-savings line.
+fn device_source_usage(
+    buckets: &[&DailyBucket],
     source: SourceId,
-    date: chrono::NaiveDate,
-) -> (TokenBreakdown, Option<f64>) {
+    id: SourceId,
+    display_name: &str,
+    today: chrono::NaiveDate,
+) -> DeviceSourceUsage {
     let mut tk = TokenBreakdown {
         input: 0,
         output: 0,
@@ -115,7 +149,8 @@ fn day_usage<'a>(
         total: 0,
     };
     let mut cost: Option<f64> = None;
-    for b in buckets.filter(|b| b.source == source && b.date == date) {
+    let mut saved: Option<f64> = None;
+    for b in buckets.iter().filter(|b| b.source == source && b.date == today) {
         tk.input += b.input;
         tk.output += b.output;
         tk.cache_read += b.cache_read;
@@ -123,9 +158,34 @@ fn day_usage<'a>(
         if let Some(c) = b.cost_usd() {
             *cost.get_or_insert(0.0) += c;
         }
+        if let Some(sv) = b
+            .model
+            .as_deref()
+            .and_then(|m| crate::pricing::cache_savings_usd(m, b.cache_read))
+        {
+            *saved.get_or_insert(0.0) += sv;
+        }
     }
     tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
-    (tk, cost)
+    let last7_totals: Vec<u64> = (0..7)
+        .rev()
+        .map(|days_ago| {
+            let d = today - chrono::Duration::days(days_ago);
+            buckets
+                .iter()
+                .filter(|b| b.source == source && b.date == d)
+                .map(|b| b.total())
+                .sum()
+        })
+        .collect();
+    DeviceSourceUsage {
+        id,
+        display_name: display_name.to_string(),
+        today_tokens: tk,
+        today_cost_usd: cost,
+        today_cache_saved_usd: saved,
+        last7_totals,
+    }
 }
 
 /// Sum one device's daily buckets from `start` onward into a range total.
@@ -229,6 +289,8 @@ impl Engine {
             cache,
             runtimes,
             notified_limit: None,
+            claude_account: crate::accounts::claude_account(),
+            codex_account: crate::accounts::codex_account(),
         }
     }
 
@@ -312,19 +374,6 @@ impl Engine {
         aggregate::prune_hourly(&mut self.cache.hourly_claude, window_start);
         aggregate::prune_hourly(&mut self.cache.hourly_codex, window_start);
 
-        // Persist the freshest measured Codex snapshot so a restarted app
-        // shows limits immediately (until the next token_count refreshes).
-        for rt in &self.runtimes {
-            if rt.id == SourceId::Codex {
-                let rl = rt
-                    .source
-                    .rate_limit(&RecentEvents(self.cache.recent_events.clone()));
-                if matches!(rl, RateLimitStatus::Measured { .. }) {
-                    self.cache.codex_rate_limit = Some(rl);
-                }
-            }
-        }
-
         // Real Claude /usage via the `claude` CLI — throttled (shell-out is
         // ~seconds). Keep the last good reading on failure; only bump the
         // timestamp so we retry no more than once per interval.
@@ -336,6 +385,25 @@ impl Engine {
             if matches!(fetched, RateLimitStatus::Cli { .. }) {
                 self.cache.claude_cli_usage = Some((Utc::now(), fetched));
             } else if let Some((at, _)) = self.cache.claude_cli_usage.as_mut() {
+                *at = Utc::now();
+            }
+        }
+
+        // Real Codex plan usage via `codex app-server` — same throttle/keep-last
+        // policy as Claude. This is the live number the ChatGPT panel shows, so
+        // it supersedes the (often 0%) local log snapshot.
+        let codex_due = self
+            .cache
+            .codex_appserver_usage
+            .as_ref()
+            .map_or(true, |(at, _)| {
+                (Utc::now() - *at).num_seconds() >= CODEX_USAGE_MIN_INTERVAL_SECS
+            });
+        if codex_due {
+            let fetched = crate::sources::codex_usage::fetch();
+            if matches!(fetched, RateLimitStatus::Measured { .. }) {
+                self.cache.codex_appserver_usage = Some((Utc::now(), fetched));
+            } else if let Some((at, _)) = self.cache.codex_appserver_usage.as_mut() {
                 *at = Utc::now();
             }
         }
@@ -369,17 +437,12 @@ impl Engine {
         let current_id = hostname();
         let mut devices = Vec::new();
 
+        let cur_buckets = self.all_buckets();
         let cur_sources = self
             .runtimes
             .iter()
             .map(|rt| {
-                let (tk, cost) = day_usage(self.all_buckets().into_iter(), rt.id, today);
-                DeviceSourceUsage {
-                    id: rt.id,
-                    display_name: rt.display_name.to_string(),
-                    today_tokens: tk,
-                    today_cost_usd: cost,
-                }
+                device_source_usage(&cur_buckets, rt.id, rt.id, rt.display_name, today)
             })
             .collect();
         devices.push(DeviceSummary {
@@ -395,17 +458,12 @@ impl Engine {
                 if df.device_id == current_id {
                     continue; // our own file — already covered by live buckets.
                 }
+                let dev_buckets: Vec<&DailyBucket> = df.daily.iter().collect();
                 let sources = self
                     .runtimes
                     .iter()
                     .map(|rt| {
-                        let (tk, cost) = day_usage(df.daily.iter(), rt.id, today);
-                        DeviceSourceUsage {
-                            id: rt.id,
-                            display_name: rt.display_name.to_string(),
-                            today_tokens: tk,
-                            today_cost_usd: cost,
-                        }
+                        device_source_usage(&dev_buckets, rt.id, rt.id, rt.display_name, today)
                     })
                     .collect();
                 devices.push(DeviceSummary {
@@ -481,20 +539,19 @@ impl Engine {
                         _ => aggregate::claude_window_estimate(&self.cache.recent_events, now),
                     },
                     SourceId::Codex => {
-                        let live = rt
-                            .source
-                            .rate_limit(&RecentEvents(self.cache.recent_events.clone()));
-                        match live {
-                            // Fresh scan hasn't seen a snapshot yet (e.g.
-                            // right after restart) → persisted fallback.
-                            RateLimitStatus::Unavailable => self
-                                .cache
-                                .codex_rate_limit
-                                .clone()
-                                .unwrap_or(RateLimitStatus::Unavailable),
-                            other => other,
+                        // Live plan usage from `codex app-server` — matches the
+                        // ChatGPT panel. The old local log snapshot is the
+                        // source of the stale/0% reading we're replacing, so we
+                        // no longer fall back to it: real number or nothing.
+                        match &self.cache.codex_appserver_usage {
+                            Some((_, rl @ RateLimitStatus::Measured { .. })) => rl.clone(),
+                            _ => RateLimitStatus::Unavailable,
                         }
                     }
+                };
+                let account = match rt.id {
+                    SourceId::ClaudeCode => self.claude_account.clone(),
+                    SourceId::Codex => self.codex_account.clone(),
                 };
                 SourceSummary {
                     id: rt.id,
@@ -505,6 +562,7 @@ impl Engine {
                     today_cache_saved_usd: saved,
                     rate_limit,
                     last7_totals,
+                    account,
                 }
             })
             .collect();
@@ -734,6 +792,26 @@ pub fn format_tokens(n: u64) -> String {
 }
 
 /// Refresh once and push results to the UI + tray. Runs on a worker thread.
+/// Set the tray title to the current rotation state (empty states = icon mode,
+/// no title). Windows has no tray title, so it goes to the hover tooltip.
+fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
+    let title: Option<String> = if info.states.is_empty() {
+        None
+    } else {
+        Some(info.states[info.idx % info.states.len()].clone())
+    };
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    let _ = tray.set_title(title);
+    #[cfg(not(target_os = "macos"))]
+    let _ = tray.set_tooltip(Some(match title {
+        Some(t) => format!("meterly — 오늘 {t}"),
+        None => "meterly".to_string(),
+    }));
+}
+
 pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
     use tauri_plugin_notification::NotificationExt;
     let state = app.state::<AppState>();
@@ -751,36 +829,45 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .body(body)
             .show();
     }
-    let display = {
+    let (display, devices) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-        engine.cache.tray_display.clone().unwrap_or_default()
+        (
+            engine.cache.tray_display.clone().unwrap_or_default(),
+            engine.get_devices(),
+        )
     };
-    if let Some(tray) = app.tray_by_id("main-tray") {
-        let title = match display.as_str() {
-            "icon" => None,
-            "cost" => {
-                let cost: f64 = summary
-                    .sources
-                    .iter()
-                    .filter_map(|s| s.today_cost_usd)
-                    .sum();
-                Some(format!("${cost:.2}"))
-            }
-            _ => {
-                let total: u64 = summary.sources.iter().map(|s| s.today_tokens.total).sum();
-                Some(format_tokens(total))
-            }
-        };
-        // macOS shows text next to the tray icon; Windows has no tray
-        // title, so the number goes into the hover tooltip instead.
-        #[cfg(target_os = "macos")]
-        let _ = tray.set_title(title);
-        #[cfg(not(target_os = "macos"))]
-        let _ = tray.set_tooltip(Some(match title {
-            Some(t) => format!("meterly — 오늘 {t}"),
-            None => "meterly".to_string(),
-        }));
-    }
+    // Build the tray rotation states. Non-icon modes cycle tokens & cost; with
+    // 2+ synced devices each also splits into 이 기기 / 전체.
+    let this_tokens: u64 = summary.sources.iter().map(|s| s.today_tokens.total).sum();
+    let this_cost: f64 = summary.sources.iter().filter_map(|s| s.today_cost_usd).sum();
+    let all_srcs = || devices.devices.iter().flat_map(|d| d.sources.iter());
+    let all_tokens: u64 = all_srcs().map(|s| s.today_tokens.total).sum();
+    let all_cost: f64 = all_srcs().filter_map(|s| s.today_cost_usd).sum();
+
+    let states: Vec<String> = if display == "icon" {
+        Vec::new()
+    } else if devices.sync_enabled && devices.devices.len() >= 2 {
+        vec![
+            format!("이 기기 {}", format_tokens(this_tokens)),
+            format!("전체 {}", format_tokens(all_tokens)),
+            format!("이 기기 ${:.2}", this_cost),
+            format!("전체 ${:.2}", all_cost),
+        ]
+    } else {
+        vec![format_tokens(this_tokens), format!("${:.2}", this_cost)]
+    };
+
+    let snapshot = {
+        let tr = app.state::<TrayRotation>();
+        let mut info = tr.0.lock().unwrap_or_else(|e| e.into_inner());
+        if info.idx >= states.len() {
+            info.idx = 0;
+        }
+        info.states = states;
+        info.clone()
+    };
+    apply_tray_title(app, &snapshot);
+
     let _ = app.emit("usage-updated", &summary);
     Some(summary)
 }
@@ -821,6 +908,25 @@ pub fn set_sync_dir(app: &AppHandle, dir: Option<String>) {
 pub fn start(app: AppHandle) {
     let watch_app = app.clone();
     std::thread::spawn(move || watch_loop(watch_app));
+
+    // Tray-title rotation: cycle 이 기기/전체 × 토큰/비용 every few seconds
+    // (only when the last refresh produced more than one state to show).
+    let rot_app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(TRAY_ROTATE_SECS));
+        let snapshot = {
+            let tr = rot_app.state::<TrayRotation>();
+            let mut info = tr.0.lock().unwrap_or_else(|e| e.into_inner());
+            if info.states.len() > 1 {
+                info.idx = (info.idx + 1) % info.states.len();
+            }
+            info.clone()
+        };
+        if snapshot.states.len() > 1 {
+            apply_tray_title(&rot_app, &snapshot);
+        }
+    });
+
     std::thread::spawn(move || loop {
         let _ = refresh_and_publish(&app);
         std::thread::sleep(Duration::from_secs(REFRESH_INTERVAL_SECS));
