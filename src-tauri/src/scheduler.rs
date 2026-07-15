@@ -104,6 +104,11 @@ pub struct DeviceSourceUsage {
     pub display_name: String,
     pub today_tokens: TokenBreakdown,
     pub today_cost_usd: Option<f64>,
+    /// USD saved today by cache reads vs full input rate (known models) — so
+    /// the 전체/host views can show the same "캐시로 …절약" line as 이 기기.
+    pub today_cache_saved_usd: Option<f64>,
+    /// Daily totals, oldest → today (7 entries) for the card sparkline.
+    pub last7_totals: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,13 +128,19 @@ pub struct DevicesData {
     pub devices: Vec<DeviceSummary>,
 }
 
-/// Sum a source's tokens + cost for one day from any bucket iterator (local
-/// in-memory buckets or a synced device file). Cost is recomputed via pricing.
-fn day_usage<'a>(
-    buckets: impl Iterator<Item = &'a DailyBucket>,
+/// Everything the popover card needs for one source of one device, computed
+/// from that device's daily buckets (local in-memory or a synced file): today's
+/// tokens/cost/cache-savings plus the 7-day daily totals (oldest→today) for the
+/// sparkline. Computing all of it here — not just today's tokens — lets the
+/// 전체/host views render identically to 이 기기 instead of dropping the
+/// sparkline and cache-savings line.
+fn device_source_usage(
+    buckets: &[&DailyBucket],
     source: SourceId,
-    date: chrono::NaiveDate,
-) -> (TokenBreakdown, Option<f64>) {
+    id: SourceId,
+    display_name: &str,
+    today: chrono::NaiveDate,
+) -> DeviceSourceUsage {
     let mut tk = TokenBreakdown {
         input: 0,
         output: 0,
@@ -138,7 +149,8 @@ fn day_usage<'a>(
         total: 0,
     };
     let mut cost: Option<f64> = None;
-    for b in buckets.filter(|b| b.source == source && b.date == date) {
+    let mut saved: Option<f64> = None;
+    for b in buckets.iter().filter(|b| b.source == source && b.date == today) {
         tk.input += b.input;
         tk.output += b.output;
         tk.cache_read += b.cache_read;
@@ -146,9 +158,34 @@ fn day_usage<'a>(
         if let Some(c) = b.cost_usd() {
             *cost.get_or_insert(0.0) += c;
         }
+        if let Some(sv) = b
+            .model
+            .as_deref()
+            .and_then(|m| crate::pricing::cache_savings_usd(m, b.cache_read))
+        {
+            *saved.get_or_insert(0.0) += sv;
+        }
     }
     tk.total = tk.input + tk.output + tk.cache_read + tk.cache_creation;
-    (tk, cost)
+    let last7_totals: Vec<u64> = (0..7)
+        .rev()
+        .map(|days_ago| {
+            let d = today - chrono::Duration::days(days_ago);
+            buckets
+                .iter()
+                .filter(|b| b.source == source && b.date == d)
+                .map(|b| b.total())
+                .sum()
+        })
+        .collect();
+    DeviceSourceUsage {
+        id,
+        display_name: display_name.to_string(),
+        today_tokens: tk,
+        today_cost_usd: cost,
+        today_cache_saved_usd: saved,
+        last7_totals,
+    }
 }
 
 /// Sum one device's daily buckets from `start` onward into a range total.
@@ -400,17 +437,12 @@ impl Engine {
         let current_id = hostname();
         let mut devices = Vec::new();
 
+        let cur_buckets = self.all_buckets();
         let cur_sources = self
             .runtimes
             .iter()
             .map(|rt| {
-                let (tk, cost) = day_usage(self.all_buckets().into_iter(), rt.id, today);
-                DeviceSourceUsage {
-                    id: rt.id,
-                    display_name: rt.display_name.to_string(),
-                    today_tokens: tk,
-                    today_cost_usd: cost,
-                }
+                device_source_usage(&cur_buckets, rt.id, rt.id, rt.display_name, today)
             })
             .collect();
         devices.push(DeviceSummary {
@@ -426,17 +458,12 @@ impl Engine {
                 if df.device_id == current_id {
                     continue; // our own file — already covered by live buckets.
                 }
+                let dev_buckets: Vec<&DailyBucket> = df.daily.iter().collect();
                 let sources = self
                     .runtimes
                     .iter()
                     .map(|rt| {
-                        let (tk, cost) = day_usage(df.daily.iter(), rt.id, today);
-                        DeviceSourceUsage {
-                            id: rt.id,
-                            display_name: rt.display_name.to_string(),
-                            today_tokens: tk,
-                            today_cost_usd: cost,
-                        }
+                        device_source_usage(&dev_buckets, rt.id, rt.id, rt.display_name, today)
                     })
                     .collect();
                 devices.push(DeviceSummary {

@@ -82,15 +82,38 @@
     }
     return sum;
   }
+  function combinedSaved(id: string): number | null {
+    let sum: number | null = null;
+    for (const d of devices?.devices ?? []) {
+      const sv = d.sources.find((x) => x.id === id)?.today_cache_saved_usd;
+      if (sv != null) sum = (sum ?? 0) + sv;
+    }
+    return sum;
+  }
+  // Element-wise sum of every device's 7-day series for a source.
+  function combinedLast7(id: string): number[] {
+    const acc = [0, 0, 0, 0, 0, 0, 0];
+    for (const d of devices?.devices ?? []) {
+      const l7 = d.sources.find((x) => x.id === id)?.last7_totals ?? [];
+      l7.forEach((v, i) => (acc[i] += v));
+    }
+    return acc;
+  }
   const deviceById = (id: string) => devices?.devices.find((d) => d.device_id === id);
+  const deviceSource = (dev: string, src: string) =>
+    deviceById(dev)?.sources.find((x) => x.id === src);
   const deviceTokens = (dev: string, src: string): TokenBreakdown =>
-    deviceById(dev)?.sources.find((x) => x.id === src)?.today_tokens ?? EMPTY_TK;
+    deviceSource(dev, src)?.today_tokens ?? EMPTY_TK;
   const deviceCost = (dev: string, src: string): number | null =>
-    deviceById(dev)?.sources.find((x) => x.id === src)?.today_cost_usd ?? null;
+    deviceSource(dev, src)?.today_cost_usd ?? null;
+  const deviceSaved = (dev: string, src: string): number | null =>
+    deviceSource(dev, src)?.today_cache_saved_usd ?? null;
+  const deviceLast7 = (dev: string, src: string): number[] =>
+    deviceSource(dev, src)?.last7_totals ?? [];
 
-  // "__local" / sync-off → this machine's live summary; "all" → summed;
-  // else the selected host. Only "all" adds the per-device breakdown, and
-  // cache-savings/sparkline stay local (this machine) only.
+  // "__local" / sync-off → this machine's live summary; "all" → summed across
+  // devices; else the selected host. Tokens, cost, cache-savings AND the
+  // sparkline are all resolved per-scope so every view renders identically.
   const combined = $derived(view === "all");
   const isLocalView = $derived(!showToggle || view === "__local");
   const shownTokens = (s: SourceSummary): TokenBreakdown =>
@@ -98,7 +121,9 @@
   const shownCost = (s: SourceSummary): number | null =>
     isLocalView ? s.today_cost_usd : view === "all" ? combinedCost(s.id) : deviceCost(view, s.id);
   const shownSaved = (s: SourceSummary): number | null =>
-    isLocalView ? s.today_cache_saved_usd : null;
+    isLocalView ? s.today_cache_saved_usd : view === "all" ? combinedSaved(s.id) : deviceSaved(view, s.id);
+  const shownLast7 = (s: SourceSummary): number[] =>
+    isLocalView ? s.last7_totals : view === "all" ? combinedLast7(s.id) : deviceLast7(view, s.id);
 
   const deviceTotal = (d: DeviceSummary): number =>
     d.sources.reduce((n, su) => n + su.today_tokens.total, 0);
@@ -213,9 +238,9 @@
         <div class="head">
           <span class="name"><span class="dot"></span>{s.display_name}</span>
           <div class="headline">
-            {#if isLocalView && !healthError(s)}
+            {#if !healthError(s)}
               <Sparkline
-                values={s.last7_totals}
+                values={shownLast7(s)}
                 color={t.sources[s.id] ?? "#8a8983"}
                 width={64}
                 height={20}
