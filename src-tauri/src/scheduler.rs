@@ -24,6 +24,25 @@ pub const REFRESH_INTERVAL_SECS: u64 = 180;
 /// process (~seconds), so it is throttled independently of the scan cycle.
 pub const CLAUDE_USAGE_MIN_INTERVAL_SECS: i64 = 120;
 
+/// Seconds between tray-title rotations (전체 ↔ 이 기기) when 2+ devices sync.
+pub const TRAY_ROTATE_SECS: u64 = 5;
+
+/// Latest tray-title values + rotation state (managed Tauri state). The menu
+/// bar is narrow, so instead of showing this-device and all-device totals at
+/// once we alternate between them every [`TRAY_ROTATE_SECS`].
+#[derive(Default, Clone)]
+pub struct TrayInfo {
+    /// This machine's total, formatted per display mode (None = icon mode).
+    pub this_title: Option<String>,
+    /// Combined all-device total, same formatting.
+    pub all_title: Option<String>,
+    /// True only when rotating is meaningful (2+ synced devices, not icon).
+    pub rotate: bool,
+    /// 0 = this device, 1 = all.
+    pub idx: usize,
+}
+pub struct TrayRotation(pub Mutex<TrayInfo>);
+
 pub struct AppState(pub Mutex<Engine>);
 
 pub struct Engine {
@@ -734,6 +753,31 @@ pub fn format_tokens(n: u64) -> String {
 }
 
 /// Refresh once and push results to the UI + tray. Runs on a worker thread.
+/// Set the tray title from the rotation state: labeled "이 기기 …" / "전체 …"
+/// while rotating, or the plain this-device total otherwise. (Windows has no
+/// tray title, so it goes to the hover tooltip.)
+fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
+    let title: Option<String> = if info.rotate {
+        if info.idx == 0 {
+            info.this_title.as_ref().map(|t| format!("이 기기 {t}"))
+        } else {
+            info.all_title.as_ref().map(|t| format!("전체 {t}"))
+        }
+    } else {
+        info.this_title.clone()
+    };
+    let Some(tray) = app.tray_by_id("main-tray") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    let _ = tray.set_title(title);
+    #[cfg(not(target_os = "macos"))]
+    let _ = tray.set_tooltip(Some(match title {
+        Some(t) => format!("meterly — 오늘 {t}"),
+        None => "meterly".to_string(),
+    }));
+}
+
 pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
     use tauri_plugin_notification::NotificationExt;
     let state = app.state::<AppState>();
@@ -751,36 +795,42 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .body(body)
             .show();
     }
-    let display = {
+    let (display, devices) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-        engine.cache.tray_display.clone().unwrap_or_default()
+        (
+            engine.cache.tray_display.clone().unwrap_or_default(),
+            engine.get_devices(),
+        )
     };
-    if let Some(tray) = app.tray_by_id("main-tray") {
-        let title = match display.as_str() {
+    // Render a total per the display mode ("icon" → no title).
+    let fmt = |tokens: u64, cost: f64| -> Option<String> {
+        match display.as_str() {
             "icon" => None,
-            "cost" => {
-                let cost: f64 = summary
-                    .sources
-                    .iter()
-                    .filter_map(|s| s.today_cost_usd)
-                    .sum();
-                Some(format!("${cost:.2}"))
-            }
-            _ => {
-                let total: u64 = summary.sources.iter().map(|s| s.today_tokens.total).sum();
-                Some(format_tokens(total))
-            }
-        };
-        // macOS shows text next to the tray icon; Windows has no tray
-        // title, so the number goes into the hover tooltip instead.
-        #[cfg(target_os = "macos")]
-        let _ = tray.set_title(title);
-        #[cfg(not(target_os = "macos"))]
-        let _ = tray.set_tooltip(Some(match title {
-            Some(t) => format!("meterly — 오늘 {t}"),
-            None => "meterly".to_string(),
-        }));
-    }
+            "cost" => Some(format!("${cost:.2}")),
+            _ => Some(format_tokens(tokens)),
+        }
+    };
+    let this_title = fmt(
+        summary.sources.iter().map(|s| s.today_tokens.total).sum(),
+        summary.sources.iter().filter_map(|s| s.today_cost_usd).sum(),
+    );
+    let all_srcs = || devices.devices.iter().flat_map(|d| d.sources.iter());
+    let all_title = fmt(
+        all_srcs().map(|s| s.today_tokens.total).sum(),
+        all_srcs().filter_map(|s| s.today_cost_usd).sum(),
+    );
+    let rotate = devices.sync_enabled && devices.devices.len() >= 2 && display != "icon";
+
+    let snapshot = {
+        let tr = app.state::<TrayRotation>();
+        let mut info = tr.0.lock().unwrap_or_else(|e| e.into_inner());
+        info.this_title = this_title;
+        info.all_title = all_title;
+        info.rotate = rotate;
+        info.clone()
+    };
+    apply_tray_title(app, &snapshot);
+
     let _ = app.emit("usage-updated", &summary);
     Some(summary)
 }
@@ -821,6 +871,25 @@ pub fn set_sync_dir(app: &AppHandle, dir: Option<String>) {
 pub fn start(app: AppHandle) {
     let watch_app = app.clone();
     std::thread::spawn(move || watch_loop(watch_app));
+
+    // Tray-title rotation: flip 이 기기 ↔ 전체 every few seconds (only when the
+    // last refresh marked it worthwhile — 2+ synced devices, non-icon mode).
+    let rot_app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(TRAY_ROTATE_SECS));
+        let snapshot = {
+            let tr = rot_app.state::<TrayRotation>();
+            let mut info = tr.0.lock().unwrap_or_else(|e| e.into_inner());
+            if info.rotate {
+                info.idx ^= 1;
+            }
+            info.clone()
+        };
+        if snapshot.rotate {
+            apply_tray_title(&rot_app, &snapshot);
+        }
+    });
+
     std::thread::spawn(move || loop {
         let _ = refresh_and_publish(&app);
         std::thread::sleep(Duration::from_secs(REFRESH_INTERVAL_SECS));

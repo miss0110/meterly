@@ -136,6 +136,9 @@ pub fn run() {
         .manage(scheduler::AppState(std::sync::Mutex::new(
             scheduler::Engine::new(),
         )))
+        .manage(scheduler::TrayRotation(std::sync::Mutex::new(
+            Default::default(),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::get_summary,
             commands::get_dashboard,
