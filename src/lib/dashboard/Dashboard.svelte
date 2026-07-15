@@ -277,12 +277,25 @@
     {@const projMax = data.projects[0]?.tokens.total || 1}
     <section class="chart-block">
       <h2>프로젝트별 <span class="muted">(기간 합계)</span></h2>
+      <div class="proj-legend muted">
+        <span><span class="lg-dot" style={`background:${t.sources.claude_code}`}></span>Claude Code</span>
+        <span><span class="lg-dot" style={`background:${t.sources.codex}`}></span>Codex</span>
+      </div>
       <div class="projects">
         {#each data.projects.slice(0, 15) as p (p.project)}
           <div class="proj-row">
             <span class="proj-name" title={p.project}>{p.project}</span>
             <span class="proj-bar">
-              <span class="proj-fill" style={`width:${(p.tokens.total / projMax) * 100}%`}></span>
+              <span
+                class="proj-fill"
+                style={`width:${(p.claude_tokens / projMax) * 100}%;background:${t.sources.claude_code}`}
+                title="Claude Code {formatTokens(p.claude_tokens)} tok"
+              ></span>
+              <span
+                class="proj-fill"
+                style={`width:${(p.codex_tokens / projMax) * 100}%;background:${t.sources.codex}`}
+                title="Codex {formatTokens(p.codex_tokens)} tok"
+              ></span>
             </span>
             <span class="proj-tok">{formatTokens(p.tokens.total)} tok</span>
             <span class="proj-cost muted">
@@ -602,16 +615,31 @@
     font-weight: 600;
   }
   .proj-bar {
+    display: flex;
     height: 8px;
     border-radius: 4px;
     background: rgba(128, 128, 128, 0.18);
     overflow: hidden;
   }
   .proj-fill {
-    display: block;
     height: 100%;
-    background: #4f8ef7;
-    border-radius: 4px;
+  }
+  .proj-legend {
+    display: flex;
+    gap: 0.9rem;
+    margin-bottom: 0.6rem;
+    font-size: 0.72rem;
+  }
+  .proj-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+  }
+  .lg-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: inline-block;
   }
   .proj-tok {
     font-variant-numeric: tabular-nums;

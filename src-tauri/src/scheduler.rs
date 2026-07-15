@@ -270,12 +270,15 @@ pub struct DeviceRangeUsage {
     pub cost_usd: Option<f64>,
 }
 
-/// Per-project token/cost total over the selected dashboard range.
+/// Per-project token/cost total over the selected dashboard range. The
+/// per-source token split drives the stacked (Claude/Codex) bar.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectUsage {
     pub project: String,
     pub tokens: TokenBreakdown,
     pub cost_usd: Option<f64>,
+    pub claude_tokens: u64,
+    pub codex_tokens: u64,
 }
 
 /// This calendar month's usage so far plus a linear month-end projection.
@@ -711,12 +714,18 @@ impl Engine {
                     total: 0,
                 },
                 cost_usd: None,
+                claude_tokens: 0,
+                codex_tokens: 0,
             });
             pu.tokens.input += b.input;
             pu.tokens.output += b.output;
             pu.tokens.cache_read += b.cache_read;
             pu.tokens.cache_creation += b.cache_creation;
             pu.tokens.total += b.total();
+            match b.source {
+                SourceId::ClaudeCode => pu.claude_tokens += b.total(),
+                SourceId::Codex => pu.codex_tokens += b.total(),
+            }
             if let Some(c) = b.cost_usd() {
                 *pu.cost_usd.get_or_insert(0.0) += c;
             }

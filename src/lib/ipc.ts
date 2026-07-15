@@ -114,6 +114,8 @@ export interface ProjectUsage {
   project: string;
   tokens: TokenBreakdown;
   cost_usd: number | null;
+  claude_tokens: number;
+  codex_tokens: number;
 }
 
 export interface MonthUsage {
