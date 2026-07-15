@@ -175,10 +175,14 @@ pub fn run() {
                 .item(&MenuItemBuilder::with_id("quit", "meterly 종료").build(app)?)
                 .build()?;
 
-            // Tray icon. The title shows today's total tokens after the
-            // first refresh; "–" is the placeholder until then.
+            // Tray icon. A dedicated monochrome sparkline glyph (transparent
+            // background) used as a macOS template image — the colorful app
+            // icon would render as a solid black box in the menu bar. The
+            // title shows today's total tokens after the first refresh; "–"
+            // is the placeholder until then.
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
             TrayIconBuilder::with_id("main-tray")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .icon_as_template(true)
                 .title("–")
                 .menu(&menu)
