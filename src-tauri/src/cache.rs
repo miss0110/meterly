@@ -69,6 +69,10 @@ pub struct CacheV1 {
     /// this-month progress bar + month-end projection. `None` = no budget set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly_budget_tokens: Option<u64>,
+    /// Date/time display preference: "auto" (OS locale) | "iso" | "us" | "eu".
+    /// `None` = auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_format: Option<String>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

@@ -156,6 +156,7 @@ export interface SettingsData {
   sync_dir: string | null;
   alerts_enabled: boolean;
   monthly_budget_tokens: number | null;
+  date_format: string; // "auto" | "iso" | "us" | "eu"
 }
 export const getSettings = () => invoke<SettingsData>("get_settings");
 export const setTrayDisplay = (mode: string) =>
@@ -166,6 +167,8 @@ export const setAlertsEnabled = (enabled: boolean) =>
   invoke<void>("set_alerts_enabled", { enabled });
 export const setMonthlyBudget = (tokens: number) =>
   invoke<void>("set_monthly_budget", { tokens });
+export const setDateFormat = (format: string) =>
+  invoke<void>("set_date_format", { format });
 export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
 export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
 export const checkForUpdates = () => invoke<void>("check_for_updates");

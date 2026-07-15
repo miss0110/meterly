@@ -1095,6 +1095,22 @@ pub fn set_monthly_budget(app: &AppHandle, tokens: Option<u64>) {
     let _ = cache::save(&path, &engine.cache);
 }
 
+/// Set the date-format preference, persist, then refresh so open windows
+/// (the popover) re-read it via the usage-updated event and re-render.
+pub fn set_date_format(app: &AppHandle, format: String) {
+    {
+        let state = app.state::<AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.date_format = Some(format);
+        let path = engine.cache_path.clone();
+        let _ = cache::save(&path, &engine.cache);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = refresh_and_publish(&app);
+    });
+}
+
 /// Set (or clear with `None`) the multi-device sync folder, persist, then
 /// refresh so this device's file is written and the combined view updates.
 pub fn set_sync_dir(app: &AppHandle, dir: Option<String>) {

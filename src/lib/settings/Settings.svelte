@@ -6,6 +6,7 @@
     setAutostart,
     setAlertsEnabled,
     setMonthlyBudget,
+    setDateFormat,
     pickSyncFolder,
     clearSyncFolder,
     checkForUpdates,
@@ -36,6 +37,17 @@
     const enabled = (e.currentTarget as HTMLInputElement).checked;
     await setAlertsEnabled(enabled);
     if (s) s.alerts_enabled = enabled;
+  }
+  const DATE_FORMATS = [
+    { id: "auto", label: "자동 (지역 표준)" },
+    { id: "iso", label: "2026-07-19 20:59" },
+    { id: "us", label: "7/19 8:59 PM" },
+    { id: "eu", label: "19/7 20:59" },
+  ];
+  async function chooseDateFormat(e: Event) {
+    const fmt = (e.currentTarget as HTMLSelectElement).value;
+    await setDateFormat(fmt);
+    if (s) s.date_format = fmt;
   }
   // Budget is entered/shown in millions of tokens; stored as raw tokens.
   async function saveBudget(e: Event) {
@@ -86,6 +98,14 @@
       <label class="row-toggle">
         <input type="checkbox" checked={s.alerts_enabled} onchange={toggleAlerts} />
         한도 사용률 알림 (30 · 50 · 70 · 90%)
+      </label>
+      <label class="row-select">
+        날짜 표시 형식
+        <select value={s.date_format} onchange={chooseDateFormat}>
+          {#each DATE_FORMATS as f}
+            <option value={f.id}>{f.label}</option>
+          {/each}
+        </select>
       </label>
     </section>
 
@@ -171,6 +191,22 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    cursor: pointer;
+  }
+  .row-select {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+  }
+  .row-select select {
+    font: inherit;
+    font-size: 0.85rem;
+    padding: 0.25rem 0.4rem;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    color: inherit;
     cursor: pointer;
   }
   .muted {
