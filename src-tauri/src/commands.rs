@@ -74,6 +74,7 @@ pub struct SettingsData {
     tray_display: String,
     autostart: bool,
     sync_dir: Option<String>,
+    alerts_enabled: bool,
 }
 
 /// Current values for the settings window.
@@ -86,7 +87,14 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
         tray_display: engine.cache.tray_display.clone().unwrap_or_default(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         sync_dir: engine.cache.sync_dir.clone(),
+        alerts_enabled: engine.cache.alerts_enabled.unwrap_or(true),
     }
+}
+
+/// Toggle plan-usage threshold notifications (30/50/70/90%).
+#[tauri::command]
+pub fn set_alerts_enabled(app: AppHandle, enabled: bool) {
+    crate::scheduler::set_alerts_enabled(&app, enabled);
 }
 
 #[tauri::command]

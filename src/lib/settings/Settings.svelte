@@ -4,6 +4,7 @@
     getSettings,
     setTrayDisplay,
     setAutostart,
+    setAlertsEnabled,
     pickSyncFolder,
     clearSyncFolder,
     checkForUpdates,
@@ -29,6 +30,11 @@
     const enabled = (e.currentTarget as HTMLInputElement).checked;
     await setAutostart(enabled);
     if (s) s.autostart = enabled;
+  }
+  async function toggleAlerts(e: Event) {
+    const enabled = (e.currentTarget as HTMLInputElement).checked;
+    await setAlertsEnabled(enabled);
+    if (s) s.alerts_enabled = enabled;
   }
   async function pick() {
     const p = await pickSyncFolder();
@@ -68,6 +74,10 @@
       <label class="row-toggle">
         <input type="checkbox" checked={s.autostart} onchange={toggleAutostart} />
         로그인 시 자동 시작
+      </label>
+      <label class="row-toggle">
+        <input type="checkbox" checked={s.alerts_enabled} onchange={toggleAlerts} />
+        한도 사용률 알림 (30 · 50 · 70 · 90%)
       </label>
     </section>
 
