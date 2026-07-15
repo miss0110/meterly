@@ -5,6 +5,7 @@
     setTrayDisplay,
     setAutostart,
     setAlertsEnabled,
+    setMonthlyBudget,
     pickSyncFolder,
     clearSyncFolder,
     checkForUpdates,
@@ -35,6 +36,13 @@
     const enabled = (e.currentTarget as HTMLInputElement).checked;
     await setAlertsEnabled(enabled);
     if (s) s.alerts_enabled = enabled;
+  }
+  // Budget is entered/shown in millions of tokens; stored as raw tokens.
+  async function saveBudget(e: Event) {
+    const m = parseFloat((e.currentTarget as HTMLInputElement).value);
+    const tokens = Number.isFinite(m) && m > 0 ? Math.round(m * 1_000_000) : 0;
+    await setMonthlyBudget(tokens);
+    if (s) s.monthly_budget_tokens = tokens > 0 ? tokens : null;
   }
   async function pick() {
     const p = await pickSyncFolder();
@@ -78,6 +86,25 @@
       <label class="row-toggle">
         <input type="checkbox" checked={s.alerts_enabled} onchange={toggleAlerts} />
         한도 사용률 알림 (30 · 50 · 70 · 90%)
+      </label>
+    </section>
+
+    <section>
+      <h2>월 토큰 예산</h2>
+      <p class="muted small">
+        이번 달 사용량과 월말 예상치를 대시보드에서 이 예산과 비교합니다. 비우면 예산 없이
+        사용량·예상치만 표시합니다.
+      </p>
+      <label class="budget">
+        <input
+          type="number"
+          min="0"
+          step="10"
+          placeholder="예: 500"
+          value={s.monthly_budget_tokens ? s.monthly_budget_tokens / 1_000_000 : ""}
+          onchange={saveBudget}
+        />
+        <span class="unit">M tok / 월</span>
       </label>
     </section>
 
@@ -184,5 +211,23 @@
   }
   .ver {
     font-size: 0.78rem;
+  }
+  .budget {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .budget input {
+    width: 7rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    color: inherit;
+    font-size: 0.85rem;
+  }
+  .budget .unit {
+    font-size: 0.8rem;
+    color: color-mix(in srgb, CanvasText 55%, transparent);
   }
 </style>

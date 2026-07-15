@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use chrono::{Local, Utc};
+use chrono::{Datelike, Local, NaiveDate, Utc};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -128,6 +128,15 @@ pub struct DevicesData {
     /// False when no sync folder is configured (only the current device shown).
     pub sync_enabled: bool,
     pub devices: Vec<DeviceSummary>,
+}
+
+/// Number of days in the given calendar month.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    NaiveDate::from_ymd_opt(ny, nm, 1)
+        .and_then(|d| d.pred_opt())
+        .map(|d| d.day())
+        .unwrap_or(30)
 }
 
 /// Everything the popover card needs for one source of one device, computed
@@ -269,6 +278,22 @@ pub struct ProjectUsage {
     pub cost_usd: Option<f64>,
 }
 
+/// This calendar month's usage so far plus a linear month-end projection.
+/// Independent of the dashboard range (always the current month); scoped like
+/// the rest of the dashboard (local / all / host).
+#[derive(Debug, Clone, Serialize)]
+pub struct MonthUsage {
+    pub tokens: u64,
+    pub cost_usd: Option<f64>,
+    /// Linear extrapolation to month end: tokens / days_elapsed * days_in_month.
+    pub projected_tokens: u64,
+    pub projected_cost_usd: Option<f64>,
+    pub days_elapsed: u32,
+    pub days_in_month: u32,
+    /// Configured monthly token budget, if any.
+    pub budget_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardData {
     pub range: String,
@@ -279,6 +304,8 @@ pub struct DashboardData {
     pub devices: Vec<DeviceRangeUsage>,
     /// Per-project totals for the range (across sources), highest first.
     pub projects: Vec<ProjectUsage>,
+    /// This month's usage + projection (independent of `range`).
+    pub month: MonthUsage,
 }
 
 impl Engine {
@@ -697,6 +724,31 @@ impl Engine {
         let mut projects: Vec<ProjectUsage> = by_project.into_values().collect();
         projects.sort_by(|a, b| b.tokens.total.cmp(&a.tokens.total));
 
+        // This calendar month + linear month-end projection (scope-aware).
+        let (y, mo) = (today.year(), today.month());
+        let days_in_month = days_in_month(y, mo);
+        let days_elapsed = today.day().max(1);
+        let mut m_tokens: u64 = 0;
+        let mut m_cost: Option<f64> = None;
+        for b in &buckets {
+            if b.date.year() == y && b.date.month() == mo {
+                m_tokens += b.total();
+                if let Some(c) = b.cost_usd() {
+                    *m_cost.get_or_insert(0.0) += c;
+                }
+            }
+        }
+        let scale = days_in_month as f64 / days_elapsed as f64;
+        let month = MonthUsage {
+            tokens: m_tokens,
+            cost_usd: m_cost,
+            projected_tokens: (m_tokens as f64 * scale) as u64,
+            projected_cost_usd: m_cost.map(|c| c * scale),
+            days_elapsed,
+            days_in_month,
+            budget_tokens: self.cache.monthly_budget_tokens,
+        };
+
         DashboardData {
             range: range.to_string(),
             rows,
@@ -706,6 +758,7 @@ impl Engine {
             ),
             devices,
             projects,
+            month,
         }
     }
 
@@ -1020,6 +1073,15 @@ pub fn set_alerts_enabled(app: &AppHandle, enabled: bool) {
     let state = app.state::<AppState>();
     let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     engine.cache.alerts_enabled = Some(enabled);
+    let path = engine.cache_path.clone();
+    let _ = cache::save(&path, &engine.cache);
+}
+
+/// Set (or clear with `None`) the monthly token budget and persist.
+pub fn set_monthly_budget(app: &AppHandle, tokens: Option<u64>) {
+    let state = app.state::<AppState>();
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.monthly_budget_tokens = tokens;
     let path = engine.cache_path.clone();
     let _ = cache::save(&path, &engine.cache);
 }

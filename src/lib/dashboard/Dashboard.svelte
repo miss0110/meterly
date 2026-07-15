@@ -209,6 +209,50 @@
     </section>
   {/if}
 
+  {#if data}
+    {@const mo = data.month}
+    {@const usedPct = mo.budget_tokens ? (mo.tokens / mo.budget_tokens) * 100 : 0}
+    {@const projPct = mo.budget_tokens ? (mo.projected_tokens / mo.budget_tokens) * 100 : 0}
+    <section class="chart-block">
+      <h2>이번 달 <span class="muted">({mo.days_elapsed}/{mo.days_in_month}일)</span></h2>
+      <div class="month-stats">
+        <div class="ms">
+          <span class="ms-label muted">사용</span>
+          <span class="ms-val">{formatTokens(mo.tokens)} tok</span>
+          {#if mo.cost_usd !== null}<span class="ms-sub muted">{formatCost(mo.cost_usd)}</span>{/if}
+        </div>
+        <div class="ms">
+          <span class="ms-label muted">월말 예상</span>
+          <span class="ms-val">{formatTokens(mo.projected_tokens)} tok</span>
+          {#if mo.projected_cost_usd !== null}
+            <span class="ms-sub muted">{formatCost(mo.projected_cost_usd)}</span>
+          {/if}
+        </div>
+        {#if mo.budget_tokens}
+          <div class="ms">
+            <span class="ms-label muted">월 예산</span>
+            <span class="ms-val">{formatTokens(mo.budget_tokens)} tok</span>
+          </div>
+        {/if}
+      </div>
+      {#if mo.budget_tokens}
+        <div class="budget-bar">
+          <span
+            class="budget-fill"
+            class:over={usedPct > 100}
+            style={`width:${Math.min(100, usedPct)}%`}
+          ></span>
+          <span class="budget-proj" style={`left:${Math.min(100, projPct)}%`}></span>
+        </div>
+        <div class="muted small">
+          예산의 {usedPct.toFixed(0)}% 사용 · 월말 예상 {projPct.toFixed(0)}%{projPct > 100
+            ? " — 예산 초과 예상 ⚠"
+            : ""}
+        </div>
+      {/if}
+    </section>
+  {/if}
+
   {#if scope === "all" && data && data.devices.length}
     <section class="chart-block">
       <h2>기기별 <span class="muted">(기간 합계)</span></h2>
@@ -483,6 +527,53 @@
   .dev-cost,
   .dev-when {
     font-size: 0.75rem;
+  }
+  .month-stats {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+  .ms {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .ms-label {
+    font-size: 0.72rem;
+  }
+  .ms-val {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+  .ms-sub {
+    font-size: 0.75rem;
+  }
+  .budget-bar {
+    position: relative;
+    height: 10px;
+    border-radius: 5px;
+    background: rgba(128, 128, 128, 0.18);
+    overflow: hidden;
+    margin-top: 0.5rem;
+  }
+  .budget-fill {
+    display: block;
+    height: 100%;
+    border-radius: 5px;
+    background: #4f8ef7;
+  }
+  .budget-fill.over {
+    background: #e0524f;
+  }
+  /* Month-end projection marker — a tick on the budget bar. */
+  .budget-proj {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: color-mix(in srgb, CanvasText 75%, transparent);
+    transform: translateX(-1px);
   }
   .projects {
     display: flex;

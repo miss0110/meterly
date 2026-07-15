@@ -75,6 +75,7 @@ pub struct SettingsData {
     autostart: bool,
     sync_dir: Option<String>,
     alerts_enabled: bool,
+    monthly_budget_tokens: Option<u64>,
 }
 
 /// Current values for the settings window.
@@ -88,6 +89,7 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         sync_dir: engine.cache.sync_dir.clone(),
         alerts_enabled: engine.cache.alerts_enabled.unwrap_or(true),
+        monthly_budget_tokens: engine.cache.monthly_budget_tokens,
     }
 }
 
@@ -95,6 +97,12 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
 #[tauri::command]
 pub fn set_alerts_enabled(app: AppHandle, enabled: bool) {
     crate::scheduler::set_alerts_enabled(&app, enabled);
+}
+
+/// Set (or clear with 0) the monthly token budget.
+#[tauri::command]
+pub fn set_monthly_budget(app: AppHandle, tokens: u64) {
+    crate::scheduler::set_monthly_budget(&app, (tokens > 0).then_some(tokens));
 }
 
 #[tauri::command]

@@ -152,6 +152,7 @@ pub fn run() {
             commands::set_tray_display,
             commands::set_autostart,
             commands::set_alerts_enabled,
+            commands::set_monthly_budget,
             commands::pick_sync_folder,
             commands::clear_sync_folder,
             commands::check_for_updates,
