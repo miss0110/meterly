@@ -669,7 +669,9 @@
     align-items: center;
   }
   .hm-cell {
-    aspect-ratio: 1 / 1.4;
+    /* Short cells so the 7×24 grid stays compact vertically (was 1 / 1.4). */
+    aspect-ratio: 1 / 0.6;
+    max-height: 22px;
     border-radius: 3px;
     border: 1px solid rgba(128, 128, 128, 0.12);
     min-width: 0;
