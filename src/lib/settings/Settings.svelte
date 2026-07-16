@@ -16,6 +16,7 @@
     getOrgStatus,
     setOrgConfig,
     orgRegister,
+    orgReportNow,
     orgDisable,
     type SettingsData,
     type OrgStatus,
@@ -78,6 +79,26 @@
     orgToken = "";
     loadOrg();
   }
+  async function reportNow() {
+    orgBusy = true;
+    orgMsg = "";
+    try {
+      const rows = await orgReportNow();
+      orgMsg = `전송 완료 — ${rows}행`;
+      loadOrg();
+    } catch (e) {
+      orgMsg = `전송 실패: ${e}`;
+    } finally {
+      orgBusy = false;
+    }
+  }
+  const fmtTime = (iso: string) => new Date(iso).toLocaleString();
+  const intervalLabel = (secs: number) =>
+    secs % 3600 === 0 ? `${secs / 3600}시간마다` : `${Math.round(secs / 60)}분마다`;
+  const nextReport = (o: OrgStatus) =>
+    o.last_report
+      ? fmtTime(new Date(new Date(o.last_report).getTime() + o.interval_secs * 1000).toISOString())
+      : "다음 새로고침 시";
 
   const DISPLAY = [
     { id: "tokens", label: "사용량·비용 표시 (순환)" },
@@ -293,21 +314,52 @@
         />
         <div class="btn-row">
           <button onclick={registerOrg} disabled={orgBusy || !orgId || (!org?.managed && !orgUrl)}>
-            {orgBusy ? "등록 중…" : org?.registered ? "다시 등록" : "등록"}
+            {orgBusy ? "처리 중…" : org?.registered ? "다시 등록" : "등록"}
           </button>
+          {#if org?.registered}
+            <button onclick={reportNow} disabled={orgBusy}>지금 전송</button>
+          {/if}
           {#if org?.registered || org?.url}
             <button class="ghost" onclick={disableOrg}>해제</button>
           {/if}
-          {#if org?.registered}
-            <span class="muted small">
-              등록됨{org.last_report ? ` · 마지막 전송 ${new Date(org.last_report).toLocaleString()}` : " · 첫 전송 대기"}
-            </span>
-          {/if}
         </div>
         {#if orgMsg}
-          <p class="small" class:err={orgMsg.startsWith("등록 실패")}>{orgMsg}</p>
+          <p class="small" class:err={orgMsg.includes("실패")}>{orgMsg}</p>
         {/if}
       </section>
+
+      {#if org?.registered}
+        <section>
+          <h2>리포팅 상태</h2>
+          <div class="org-status">
+            <div class="st-row">
+              <span class="st-key">상태</span>
+              <span><span class="st-ok">● 등록됨</span> — {org.user_id} @ {org.hostname}</span>
+            </div>
+            <div class="st-row">
+              <span class="st-key">전송 주기</span>
+              <span>{intervalLabel(org.interval_secs)} (실패 시 다음 새로고침에 재시도)</span>
+            </div>
+            <div class="st-row">
+              <span class="st-key">마지막 전송</span>
+              <span>{org.last_report ? fmtTime(org.last_report) : "아직 없음 (첫 전송 대기)"}</span>
+            </div>
+            <div class="st-row">
+              <span class="st-key">다음 전송</span>
+              <span>{nextReport(org)}</span>
+            </div>
+            <div class="st-row">
+              <span class="st-key">전송 대상</span>
+              <span class="mono">{org.url}</span>
+            </div>
+          </div>
+        </section>
+      {:else if org?.url || org?.managed}
+        <section>
+          <h2>리포팅 상태</h2>
+          <p class="muted small">● 미등록 — 식별자를 입력하고 [등록]을 눌러야 전송이 시작됩니다.</p>
+        </section>
+      {/if}
     {:else if tab === "about"}
       <section>
         <h2>진단</h2>
@@ -508,5 +560,33 @@
   }
   .err {
     color: #e0524f;
+  }
+  /* Org reporting status panel. */
+  .org-status {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, CanvasText 4%, transparent);
+    font-size: 0.82rem;
+  }
+  .st-row {
+    display: flex;
+    gap: 0.75rem;
+  }
+  .st-key {
+    flex: 0 0 5.5rem;
+    color: color-mix(in srgb, CanvasText 55%, transparent);
+  }
+  .st-ok {
+    color: #2fa653;
+    font-weight: 600;
+  }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    word-break: break-all;
   }
 </style>

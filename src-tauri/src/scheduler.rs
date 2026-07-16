@@ -1218,24 +1218,17 @@ fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
     let _ = app.emit("usage-updated", summary);
 }
 
-/// Org usage reporting tick: when an org config exists and the device is
-/// registered, POST a usage snapshot once per report interval. The payload is
-/// built under the engine lock; the HTTP call runs without it.
-fn org_report_tick(app: &AppHandle) {
+/// Send an org usage report NOW (no throttle check): build the payload under
+/// the engine lock, POST without it, mark last_org_report on success. Returns
+/// the number of rows sent. Also used by the Settings "지금 전송" button.
+pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
     let state = app.state::<AppState>();
     let (cfg, payload) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(cfg) = crate::orgreport::resolve(&engine.cache) else {
-            return;
-        };
+        let cfg = crate::orgreport::resolve(&engine.cache)
+            .ok_or("조직 리포팅이 설정되지 않았습니다")?;
         if !engine.cache.org_registered {
-            return; // registration (Settings button) hasn't happened yet
-        }
-        let due = engine.cache.last_org_report.map_or(true, |at| {
-            (Utc::now() - at).num_seconds() >= crate::orgreport::REPORT_INTERVAL_SECS
-        });
-        if !due {
-            return;
+            return Err("먼저 등록하세요".into());
         }
         let payload = crate::orgreport::UsagePayload {
             schema: 1,
@@ -1258,11 +1251,31 @@ fn org_report_tick(app: &AppHandle) {
             let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
             engine.cache.last_org_report = Some(Utc::now());
             engine.save_cache_best_effort();
+            Ok(payload.daily.len())
         }
         Err(err) => {
-            // Keep last_org_report unchanged → retried next refresh cycle.
+            // last_org_report unchanged → the tick retries next refresh cycle.
             crate::logging::warn(&format!("org report failed: {err}"));
+            Err(err)
         }
+    }
+}
+
+/// Org usage reporting tick: when configured + registered and the report
+/// interval elapsed, send a snapshot.
+fn org_report_tick(app: &AppHandle) {
+    let due = {
+        let state = app.state::<AppState>();
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if crate::orgreport::resolve(&engine.cache).is_none() || !engine.cache.org_registered {
+            return;
+        }
+        engine.cache.last_org_report.map_or(true, |at| {
+            (Utc::now() - at).num_seconds() >= crate::orgreport::REPORT_INTERVAL_SECS
+        })
+    };
+    if due {
+        let _ = send_org_report(app); // outcome already logged
     }
 }
 

@@ -207,8 +207,13 @@ export interface OrgStatus {
   user_id: string | null;
   registered: boolean;
   last_report: string | null;
+  /** Reporting cadence in seconds (fixed). */
+  interval_secs: number;
+  hostname: string;
 }
 export const getOrgStatus = () => invoke<OrgStatus>("get_org_status");
+/** Send a usage report immediately; resolves to the number of rows sent. */
+export const orgReportNow = () => invoke<number>("org_report_now");
 export const setOrgConfig = (
   url: string | null,
   token: string | null,

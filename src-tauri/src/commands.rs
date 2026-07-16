@@ -198,6 +198,10 @@ pub struct OrgStatus {
     user_id: Option<String>,
     registered: bool,
     last_report: Option<chrono::DateTime<chrono::Utc>>,
+    /// Reporting cadence (fixed) — shown in the Settings status panel.
+    interval_secs: i64,
+    /// This device's hostname (sent alongside the identifier).
+    hostname: String,
 }
 
 #[tauri::command]
@@ -214,7 +218,16 @@ pub fn get_org_status(state: State<'_, AppState>) -> OrgStatus {
         user_id: engine.cache.org_user_id.clone(),
         registered: engine.cache.org_registered,
         last_report: engine.cache.last_org_report,
+        interval_secs: crate::orgreport::REPORT_INTERVAL_SECS,
+        hostname: crate::scheduler::hostname(),
     }
+}
+
+/// Send a usage report immediately (Settings "지금 전송" — connectivity check).
+/// Returns the number of rows sent. `async` — network off the main thread.
+#[tauri::command(async)]
+pub fn org_report_now(app: AppHandle) -> Result<usize, String> {
+    crate::scheduler::send_org_report(&app)
 }
 
 /// Save org settings (url/token ignored while a managed file exists). Any
