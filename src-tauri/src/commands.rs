@@ -155,6 +155,13 @@ pub fn check_for_updates(app: AppHandle) {
     crate::check_updates(app, true);
 }
 
+/// Version of an available update found by the background scan, if any —
+/// drives the popover's update banner.
+#[tauri::command]
+pub fn get_update_status(state: State<'_, crate::UpdateState>) -> Option<String> {
+    state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Show the settings window (tray "설정" / Cmd+,).
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {

@@ -513,6 +513,14 @@ impl Engine {
     /// from live in-memory buckets; others from their synced files (its own
     /// file is skipped to avoid double counting). Rate-limit % is intentionally
     /// absent here — it is account-global, not per-device.
+    /// Persist the cache now (best effort) — for callers outside this module
+    /// that mutate `cache` (e.g. the update-notification dedup).
+    pub fn save_cache_best_effort(&self) {
+        if let Err(err) = cache::save(&self.cache_path, &self.cache) {
+            crate::logging::warn(&format!("cache save failed: {err}"));
+        }
+    }
+
     pub fn get_devices(&self) -> DevicesData {
         let today = Local::now().date_naive();
         let current_id = hostname();

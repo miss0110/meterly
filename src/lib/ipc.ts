@@ -187,3 +187,11 @@ export const onUsageUpdated = (
   handler: (summary: Summary) => void,
 ): Promise<UnlistenFn> =>
   listen<Summary>("usage-updated", (event) => handler(event.payload));
+
+/** Available-update version from the background scan (null = up to date). */
+export const getUpdateStatus = () =>
+  invoke<string | null>("get_update_status");
+export const onUpdateAvailable = (
+  handler: (version: string) => void,
+): Promise<UnlistenFn> =>
+  listen<string>("update-available", (event) => handler(event.payload));

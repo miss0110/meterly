@@ -73,6 +73,10 @@ pub struct CacheV1 {
     /// `None` = auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date_format: Option<String>,
+    /// Last update version the user was notified about — one notification per
+    /// version, surviving restarts (the popover banner still shows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_notified_update: Option<String>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on
