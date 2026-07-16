@@ -16,8 +16,9 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
 use serde_json::Value;
@@ -25,8 +26,8 @@ use serde_json::Value;
 use crate::model::RateLimitStatus;
 
 /// Hard cap on the whole handshake (cold app-server start can be slow — it
-/// refreshes the model list on boot).
-const TIMEOUT_SECS: u64 = 20;
+/// refreshes the model list on boot, and the rate-limit read hits the network).
+const TIMEOUT_SECS: u64 = 30;
 
 /// Locate the `codex` binary. A macOS `.app` launched from Finder gets a
 /// minimal PATH that excludes `~/.local/bin`, so we probe known locations
@@ -84,7 +85,7 @@ pub fn fetch() -> RateLimitStatus {
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped()); // captured for diagnostics on timeout
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -114,16 +115,31 @@ pub fn fetch() -> RateLimitStatus {
         return RateLimitStatus::Unavailable;
     }
 
-    // Read replies on a worker thread so we can bound the wait. We only care
-    // about the response to request id 2.
+    // Capture stderr so a hang can be explained (model-refresh/network/auth
+    // errors surface here). Bounded so a chatty server can't grow unbounded.
+    let errbuf = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let errbuf = errbuf.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut b = errbuf.lock().unwrap_or_else(|e| e.into_inner());
+                if b.len() < 4000 {
+                    b.push_str(&line);
+                    b.push('\n');
+                }
+            }
+        });
+    }
+
+    // Forward every reply line (any with an id) so we can tell whether
+    // `initialize` (id 1) answered but `account/rateLimits/read` (id 2) didn't
+    // — that distinguishes a boot problem from a hung rate-limit call.
     let (tx, rx) = mpsc::channel();
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if v.get("id").and_then(Value::as_i64) == Some(2) {
-                        let _ = tx.send(v);
+                    if v.get("id").and_then(Value::as_i64).is_some() && tx.send(v).is_err() {
                         return;
                     }
                 }
@@ -131,8 +147,29 @@ pub fn fetch() -> RateLimitStatus {
         });
     }
 
-    let outcome = match rx.recv_timeout(Duration::from_secs(TIMEOUT_SECS)) {
-        Ok(v) => {
+    let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+    let mut saw_init = false;
+    let mut reply: Option<Value> = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(v) => match v.get("id").and_then(Value::as_i64) {
+                Some(1) => saw_init = true,
+                Some(2) => {
+                    reply = Some(v);
+                    break;
+                }
+                _ => {}
+            },
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let outcome = match reply {
+        Some(v) => {
             let parsed = parse_rate_limits(&v);
             match &parsed {
                 RateLimitStatus::Measured { primary_used_percent, .. } => {
@@ -141,8 +178,6 @@ pub fn fetch() -> RateLimitStatus {
                     ));
                 }
                 _ => {
-                    // Got a reply but no usable rateLimits — often "not signed
-                    // in to Codex" or an API/version change.
                     let hint = v
                         .get("error")
                         .and_then(|e| e.get("message"))
@@ -153,9 +188,21 @@ pub fn fetch() -> RateLimitStatus {
             }
             parsed
         }
-        Err(_) => {
+        None => {
+            let tail = {
+                let b = errbuf.lock().unwrap_or_else(|e| e.into_inner());
+                let joined = b.trim().replace('\n', " | ");
+                let n = joined.chars().count();
+                if n > 600 {
+                    joined.chars().skip(n - 600).collect::<String>()
+                } else {
+                    joined
+                }
+            };
             crate::logging::warn(&format!(
-                "codex app-server: no reply within {TIMEOUT_SECS}s"
+                "codex app-server: no reply within {TIMEOUT_SECS}s (initialize: {}); stderr: {}",
+                if saw_init { "ok" } else { "no reply" },
+                if tail.is_empty() { "<none>" } else { &tail },
             ));
             RateLimitStatus::Unavailable
         }
