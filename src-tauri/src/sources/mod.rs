@@ -68,6 +68,48 @@ pub fn project_from_cwd(cwd: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// PATH for spawning the `codex`/`claude` CLIs from a GUI context.
+///
+/// A Finder-launched app gets a minimal PATH (`/usr/bin:/bin:...`). When the
+/// CLI is an npm-installed launcher script (`#!/usr/bin/env node`), `env`
+/// then fails with "node: No such file or directory" — seen in the field.
+/// Append the common node install locations (homebrew, nvm, volta, asdf,
+/// fnm) so the shebang resolves; existing PATH entries stay first.
+pub fn spawn_path() -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".volta/bin"));
+        dirs.push(home.join(".asdf/shims"));
+        // nvm: versioned dirs — take every <ver>/bin (newest sort not needed;
+        // any node on PATH satisfies the shebang).
+        if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            for e in entries.flatten() {
+                dirs.push(e.path().join("bin"));
+            }
+        }
+        // fnm (macOS default data dir).
+        if let Ok(entries) =
+            std::fs::read_dir(home.join("Library/Application Support/fnm/node-versions"))
+        {
+            for e in entries.flatten() {
+                dirs.push(e.path().join("installation/bin"));
+            }
+        }
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut all: Vec<PathBuf> = std::env::split_paths(&current).collect();
+    for d in dirs {
+        if d.is_dir() && !all.contains(&d) {
+            all.push(d);
+        }
+    }
+    std::env::join_paths(all).unwrap_or(current)
+}
+
 /// Contract every usage source implements (plan: Contract surface).
 pub trait UsageSource: Send {
     fn id(&self) -> SourceId;

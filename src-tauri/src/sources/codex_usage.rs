@@ -83,6 +83,10 @@ pub fn fetch() -> RateLimitStatus {
     let mut cmd = Command::new(bin);
     cmd.args(["app-server", "-c", "notify=[]"])
         .current_dir(std::env::temp_dir())
+        // npm-installed codex is a `#!/usr/bin/env node` script; a GUI app's
+        // minimal PATH has no node, so augment it (field: "env: node: No such
+        // file or directory").
+        .env("PATH", crate::sources::spawn_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped()); // captured for diagnostics on timeout

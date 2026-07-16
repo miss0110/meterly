@@ -65,6 +65,9 @@ pub fn fetch() -> RateLimitStatus {
     let mut child = match Command::new(bin)
         .args(["-p", "/usage"])
         .current_dir(std::env::temp_dir())
+        // Same PATH augmentation as codex — npm-installed claude is a node
+        // launcher script and a GUI app's minimal PATH lacks node.
+        .env("PATH", crate::sources::spawn_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
