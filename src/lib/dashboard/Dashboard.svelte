@@ -676,10 +676,10 @@
     padding-right: 6px;
   }
   .hm-cell {
-    /* Short cells so the 7×24 grid stays compact vertically (was 1 / 1.4). */
-    aspect-ratio: 1 / 0.6;
-    max-height: 22px;
-    /* Contiguous, gapless tiling — the color separates cells, not borders. */
+    /* Fixed height + stretch width: the cell always fills its grid column, so
+       the tiling stays gapless at any window size. (aspect-ratio + max-height
+       transferred the cap into a max-WIDTH on wide windows, leaving gaps.) */
+    height: 22px;
     min-width: 0;
   }
   /* Round only the block's outer corners. */
