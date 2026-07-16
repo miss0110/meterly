@@ -658,7 +658,9 @@
   .heatmap {
     display: grid;
     grid-template-columns: 2rem repeat(24, 1fr);
-    gap: 0;
+    /* Thin seams between hour columns only; rows stay contiguous. */
+    column-gap: 2px;
+    row-gap: 0;
   }
   .hm-corner {
   }
