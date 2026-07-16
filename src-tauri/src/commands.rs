@@ -165,3 +165,21 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     w.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// Reveal the local log folder in Finder/Explorer so a user can grab the logs.
+#[tauri::command]
+pub fn open_log_dir() -> Result<(), String> {
+    let dir = crate::logging::log_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(target_os = "windows")]
+    let opener = "explorer";
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

@@ -10,6 +10,7 @@
     pickSyncFolder,
     clearSyncFolder,
     checkForUpdates,
+    openLogDir,
     type SettingsData,
   } from "../ipc";
 
@@ -144,6 +145,16 @@
         {#if s.sync_dir}
           <button class="ghost" onclick={clearSync}>해제</button>
         {/if}
+      </div>
+    </section>
+
+    <section>
+      <h2>진단</h2>
+      <p class="muted small">
+        문제가 있을 때 참고할 로그를 이 기기에 일 단위로 최대 7일 보관합니다.
+      </p>
+      <div class="btn-row">
+        <button onclick={() => openLogDir()}>로그 폴더 열기</button>
       </div>
     </section>
 

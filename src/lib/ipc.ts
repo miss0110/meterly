@@ -172,6 +172,7 @@ export const setDateFormat = (format: string) =>
 export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
 export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
 export const checkForUpdates = () => invoke<void>("check_for_updates");
+export const openLogDir = () => invoke<void>("open_log_dir");
 export const openSettings = () => invoke<void>("open_settings");
 // scope: "all" | "local" | a device_id (a specific host).
 export const getDashboard = (range: Range, scope = "local") =>

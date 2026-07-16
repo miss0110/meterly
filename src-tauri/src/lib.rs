@@ -3,6 +3,7 @@ pub mod aggregate;
 pub mod cache;
 pub mod commands;
 pub mod devicesync;
+pub mod logging;
 pub mod model;
 pub mod pricing;
 pub mod scheduler;
@@ -59,6 +60,9 @@ pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
         match tauri::async_runtime::block_on(updater.check()) {
             Ok(Some(update)) => {
                 let new_version = update.version.clone();
+                crate::logging::info(&format!(
+                    "update available: v{new_version} (current v{current})"
+                ));
                 let install = handle
                     .dialog()
                     .message(format!(
@@ -77,6 +81,7 @@ pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
                     update.download_and_install(|_, _| {}, || {}),
                 ) {
                     Ok(()) => {
+                        crate::logging::info(&format!("update installed: v{new_version}"));
                         let restart = handle
                             .dialog()
                             .message(format!(
@@ -93,6 +98,7 @@ pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
                         }
                     }
                     Err(err) => {
+                        crate::logging::error(&format!("update install failed: {err}"));
                         handle
                             .dialog()
                             .message(format!("업데이트 설치에 실패했습니다.\n{err}"))
@@ -111,6 +117,7 @@ pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
                 }
             }
             Err(err) => {
+                crate::logging::warn(&format!("update check failed: {err}"));
                 if manual {
                     handle
                         .dialog()
@@ -157,12 +164,21 @@ pub fn run() {
             commands::pick_sync_folder,
             commands::clear_sync_folder,
             commands::check_for_updates,
-            commands::open_settings
+            commands::open_settings,
+            commands::open_log_dir
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Local daily logs (last week kept) for field diagnosis.
+            crate::logging::prune();
+            crate::logging::info(&format!(
+                "meterly {} starting ({})",
+                app.package_info().version,
+                std::env::consts::OS
+            ));
 
             // Tray menu: 설정 / 대시보드 / 새로고침 / 종료. Detailed controls
             // (display mode, autostart, sync folder, updates) live in the
