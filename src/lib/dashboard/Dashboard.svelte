@@ -76,7 +76,8 @@
   const heatmapMax = $derived(Math.max(...heatmap.map((c) => c.total), 1));
 
   function heatColor(total: number): string {
-    if (total === 0) return "transparent";
+    // Faint base (not transparent) so the gapless grid still shows empty cells.
+    if (total === 0) return "color-mix(in srgb, currentColor 8%, transparent)";
     // sqrt scale: heavy-tail token counts would otherwise flatten the ramp.
     const idx = Math.min(
       t.seq.length - 1,
@@ -284,7 +285,11 @@
       <div class="projects">
         {#each data.projects.slice(0, 15) as p (p.project)}
           <div class="proj-row">
-            <span class="proj-name" title={p.project}>{p.project}</span>
+            <span
+              class="proj-name"
+              title={p.project === "(미분류)"
+                ? "프로젝트(cwd)가 기록되지 않은 사용량 — 프로젝트 추적 이전의 과거 데이터가 대부분이며, 기간이 지나면 줄어듭니다"
+                : p.project}>{p.project}</span>
             <span class="proj-bar">
               <span
                 class="proj-fill"
@@ -653,7 +658,9 @@
   .heatmap {
     display: grid;
     grid-template-columns: 2rem repeat(24, 1fr);
-    gap: 2px;
+    /* Thin seams between hour columns only; rows stay contiguous. */
+    column-gap: 2px;
+    row-gap: 0;
   }
   .hm-corner {
   }
@@ -661,17 +668,29 @@
     font-size: 0.6rem;
     opacity: 0.55;
     text-align: center;
+    padding-bottom: 4px;
   }
   .hm-day {
     font-size: 0.65rem;
     opacity: 0.65;
     display: flex;
     align-items: center;
+    padding-right: 6px;
   }
   .hm-cell {
-    aspect-ratio: 1 / 1.4;
-    border-radius: 3px;
-    border: 1px solid rgba(128, 128, 128, 0.12);
+    /* Fixed height + stretch width: the cell always fills its grid column, so
+       the tiling stays gapless at any window size. (aspect-ratio + max-height
+       transferred the cap into a max-WIDTH on wide windows, leaving gaps.) */
+    height: 22px;
     min-width: 0;
+  }
+  /* Round only the block's outer corners. */
+  .hm-day + .hm-cell {
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+  }
+  .hm-cell:last-child {
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
   }
 </style>

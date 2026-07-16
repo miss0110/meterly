@@ -742,7 +742,7 @@ impl Engine {
             if b.date < start {
                 continue;
             }
-            let name = b.project.clone().unwrap_or_else(|| "(기타)".to_string());
+            let name = b.project.clone().unwrap_or_else(|| "(미분류)".to_string());
             let pu = by_project.entry(name.clone()).or_insert_with(|| ProjectUsage {
                 project: name,
                 tokens: TokenBreakdown {
