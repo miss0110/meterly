@@ -40,9 +40,11 @@
   // "all" | "__local" (this machine) | a device_id (a specific host).
   let view = $state<string>("__local");
   let refreshing = $state(false);
-  // Date-format preference (Settings). Re-read on each refresh so a change in
+  // Display preferences (Settings). Re-read on each refresh so a change in
   // the Settings window applies without an app restart.
   let dateFmt = $state<DateFormat>("auto");
+  // "used" (사용한 양) | "remaining" (남은 양) for the limit gauges.
+  let pctMode = $state<string>("used");
   // Available-update version from the background scan (null = up to date).
   let updateVersion = $state<string | null>(null);
 
@@ -53,7 +55,10 @@
   }
   function loadDateFmt() {
     getSettings()
-      .then((s) => (dateFmt = (s.date_format as DateFormat) ?? "auto"))
+      .then((s) => {
+        dateFmt = (s.date_format as DateFormat) ?? "auto";
+        pctMode = s.percent_display ?? "used";
+      })
       .catch(() => {});
   }
 
@@ -334,12 +339,16 @@
                 <div class="usage">
                   <span class="lim-head"><b class="badge">{uv.badge}</b></span>
                   {#each uv.rows as r}
+                    {@const shown = pctMode === "remaining" ? Math.max(0, 100 - r.percent) : r.percent}
+                    <!-- warn/crit always key on USED percent, whatever is shown. -->
                     <div class="uwin" class:warn={r.percent >= 70} class:crit={r.percent >= 90}>
                       <span class="uwin-label" title={r.label}>{r.label}</span>
                       <span class="meter">
-                        <span class="fill" style={`width:${Math.min(100, r.percent)}%`}></span>
+                        <span class="fill" style={`width:${Math.min(100, shown)}%`}></span>
                       </span>
-                      <span class="uwin-pct">{r.percent.toFixed(0)}%</span>
+                      <span class="uwin-pct">
+                        {shown.toFixed(0)}%{pctMode === "remaining" ? " 남음" : ""}
+                      </span>
                       {#if r.reset}
                         <span class="muted small reset">리셋 {r.reset}</span>
                       {/if}

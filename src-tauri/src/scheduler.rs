@@ -892,14 +892,27 @@ impl Engine {
     }
 }
 
-/// Plan-usage thresholds that trigger a notification, ascending.
-const LIMIT_THRESHOLDS: [u8; 4] = [30, 50, 70, 90];
+/// Default plan-usage thresholds that trigger a notification, ascending.
+pub const DEFAULT_LIMIT_THRESHOLDS: [u8; 4] = [30, 50, 70, 90];
+
+/// Sanitize user-provided thresholds: clamp to 1..=100, sort, dedup. Empty
+/// input falls back to the defaults (there must always be something to alert).
+pub fn normalize_thresholds(raw: &[u8]) -> Vec<u8> {
+    let mut v: Vec<u8> = raw.iter().copied().filter(|t| (1..=100).contains(t)).collect();
+    v.sort_unstable();
+    v.dedup();
+    if v.is_empty() {
+        DEFAULT_LIMIT_THRESHOLDS.to_vec()
+    } else {
+        v
+    }
+}
 
 /// Highest threshold `percent` newly crosses given the highest already
 /// notified for this window (`prior_max`). Returns `None` when nothing new
 /// crossed — so climbing within a band (e.g. 72→75%) stays silent.
-fn threshold_crossing(prior_max: u8, percent: f64) -> Option<u8> {
-    let crossed = LIMIT_THRESHOLDS
+fn threshold_crossing(prior_max: u8, percent: f64, thresholds: &[u8]) -> Option<u8> {
+    let crossed = thresholds
         .iter()
         .rev()
         .copied()
@@ -984,6 +997,12 @@ impl Engine {
     /// notified for its current window. Each window notifies once per threshold
     /// per reset period; it re-arms when the window rolls over.
     pub fn limit_notification(&mut self, summary: &Summary) -> Vec<(String, String)> {
+        let thresholds = self
+            .cache
+            .alert_thresholds
+            .as_deref()
+            .map(normalize_thresholds)
+            .unwrap_or_else(|| DEFAULT_LIMIT_THRESHOLDS.to_vec());
         let mut out = Vec::new();
         for s in &summary.sources {
             for g in gauges(s) {
@@ -995,7 +1014,7 @@ impl Engine {
                 if entry.0 != g.reset_id {
                     *entry = (g.reset_id.clone(), 0);
                 }
-                let Some(crossed) = threshold_crossing(entry.1, g.percent) else {
+                let Some(crossed) = threshold_crossing(entry.1, g.percent, &thresholds) else {
                     continue;
                 };
                 entry.1 = crossed;
@@ -1010,6 +1029,83 @@ impl Engine {
             }
         }
         out
+    }
+}
+
+/// Body of the weekly report for the week before `monday` (Mon–Sun), or
+/// `None` when that week had no usage. Includes per-source tokens, cost,
+/// week-over-week delta, and the top project.
+fn weekly_report_body(buckets: &[&DailyBucket], monday: NaiveDate) -> Option<String> {
+    let last_start = monday - chrono::Duration::days(7);
+    let prev_start = monday - chrono::Duration::days(14);
+    let mut last_claude: u64 = 0;
+    let mut last_codex: u64 = 0;
+    let mut last_cost: f64 = 0.0;
+    let mut have_cost = false;
+    let mut prev_total: u64 = 0;
+    let mut by_project: HashMap<String, u64> = HashMap::new();
+    for b in buckets {
+        if b.date >= last_start && b.date < monday {
+            match b.source {
+                SourceId::ClaudeCode => last_claude += b.total(),
+                SourceId::Codex => last_codex += b.total(),
+            }
+            if let Some(c) = b.cost_usd() {
+                last_cost += c;
+                have_cost = true;
+            }
+            *by_project
+                .entry(b.project.clone().unwrap_or_else(|| "(미분류)".into()))
+                .or_insert(0) += b.total();
+        } else if b.date >= prev_start && b.date < last_start {
+            prev_total += b.total();
+        }
+    }
+    let last_total = last_claude + last_codex;
+    if last_total == 0 {
+        return None;
+    }
+    let mut body = format!(
+        "지난주 Claude {} · Codex {} tok",
+        format_tokens(last_claude),
+        format_tokens(last_codex)
+    );
+    if have_cost {
+        body.push_str(&format!(" · API 환산 ${last_cost:.1}"));
+    }
+    if prev_total > 0 {
+        let pct = (last_total as f64 - prev_total as f64) / prev_total as f64 * 100.0;
+        body.push_str(&format!(
+            " · 전주 대비 {}{:.0}%",
+            if pct >= 0.0 { "+" } else { "" },
+            pct
+        ));
+    }
+    if let Some((name, _)) = by_project.into_iter().max_by_key(|(_, v)| *v) {
+        body.push_str(&format!(" · 최다 프로젝트 {name}"));
+    }
+    Some(body)
+}
+
+impl Engine {
+    /// Weekly usage report, once per week: fires on the first refresh on/after
+    /// each Monday, summarizing the previous Mon–Sun. Dedup persisted.
+    pub fn weekly_report_notification(&mut self) -> Option<(String, String)> {
+        let today = Local::now().date_naive();
+        let monday =
+            today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+        if self.cache.last_weekly_report == Some(monday) {
+            return None;
+        }
+        // Mark first (and persist now — refresh already saved before this
+        // runs) so a usage-free week doesn't recheck and a quick quit doesn't
+        // re-send next launch.
+        self.cache.last_weekly_report = Some(monday);
+        self.save_cache_best_effort();
+        let buckets = self.all_buckets();
+        let body = weekly_report_body(&buckets, monday)?;
+        crate::logging::info(&format!("weekly report: {body}"));
+        Some(("주간 사용 리포트".into(), body))
     }
 }
 
@@ -1050,12 +1146,17 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
     let (summary, notifications) = {
         let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         let summary = engine.refresh();
-        // Alerts on by default; the Settings toggle can silence them.
-        let notifications = if engine.cache.alerts_enabled.unwrap_or(true) {
+        // Alerts on by default; the Settings toggle silences both kinds.
+        let mut notifications = if engine.cache.alerts_enabled.unwrap_or(true) {
             engine.limit_notification(&summary)
         } else {
             Vec::new()
         };
+        if engine.cache.alerts_enabled.unwrap_or(true) {
+            if let Some(report) = engine.weekly_report_notification() {
+                notifications.push(report);
+            }
+        }
         (summary, notifications)
     };
     for (title, body) in notifications {
@@ -1147,6 +1248,33 @@ pub fn set_alerts_enabled(app: &AppHandle, enabled: bool) {
     let state = app.state::<AppState>();
     let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     engine.cache.alerts_enabled = Some(enabled);
+    let path = engine.cache_path.clone();
+    let _ = cache::save(&path, &engine.cache);
+}
+
+/// Set the limit-gauge display mode ("used" | "remaining"), persist, then
+/// republish so the open popover re-reads and re-renders.
+pub fn set_percent_display(app: &AppHandle, mode: String) {
+    {
+        let state = app.state::<AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.percent_display = Some(mode);
+        let path = engine.cache_path.clone();
+        let _ = cache::save(&path, &engine.cache);
+    }
+    let app = app.clone();
+    std::thread::spawn(move || republish(&app));
+}
+
+/// Set custom alert thresholds (empty = reset to defaults) and persist.
+pub fn set_alert_thresholds(app: &AppHandle, thresholds: Vec<u8>) {
+    let state = app.state::<AppState>();
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.alert_thresholds = if thresholds.is_empty() {
+        None
+    } else {
+        Some(normalize_thresholds(&thresholds))
+    };
     let path = engine.cache_path.clone();
     let _ = cache::save(&path, &engine.cache);
 }
@@ -1296,18 +1424,62 @@ mod tests {
 
     #[test]
     fn threshold_crossing_fires_highest_band_once() {
+        let t = &DEFAULT_LIMIT_THRESHOLDS;
         // Nothing below 30%.
-        assert_eq!(threshold_crossing(0, 0.0), None);
-        assert_eq!(threshold_crossing(0, 29.9), None);
+        assert_eq!(threshold_crossing(0, 0.0, t), None);
+        assert_eq!(threshold_crossing(0, 29.9, t), None);
         // First crossing fires the highest band reached.
-        assert_eq!(threshold_crossing(0, 30.0), Some(30));
-        assert_eq!(threshold_crossing(0, 75.0), Some(70));
+        assert_eq!(threshold_crossing(0, 30.0, t), Some(30));
+        assert_eq!(threshold_crossing(0, 75.0, t), Some(70));
         // Climbing within/under the last band stays silent.
-        assert_eq!(threshold_crossing(70, 71.0), None);
-        assert_eq!(threshold_crossing(70, 89.9), None);
+        assert_eq!(threshold_crossing(70, 71.0, t), None);
+        assert_eq!(threshold_crossing(70, 89.9, t), None);
         // Crossing into a higher band fires again.
-        assert_eq!(threshold_crossing(70, 92.0), Some(90));
-        assert_eq!(threshold_crossing(90, 100.0), None);
+        assert_eq!(threshold_crossing(70, 92.0, t), Some(90));
+        assert_eq!(threshold_crossing(90, 100.0, t), None);
+        // Custom thresholds apply.
+        assert_eq!(threshold_crossing(0, 55.0, &[50, 95]), Some(50));
+        assert_eq!(threshold_crossing(50, 94.0, &[50, 95]), None);
+    }
+
+    #[test]
+    fn weekly_report_summarizes_last_week_with_delta_and_top_project() {
+        let mk = |date: NaiveDate, source: SourceId, project: &str, input: u64| DailyBucket {
+            date,
+            source,
+            model: Some("claude-sonnet-5".into()),
+            project: Some(project.into()),
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+        };
+        let monday = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap(); // a Monday
+        let owned = vec![
+            // Last week (7/6–7/12): claude 300 (meterly), codex 100 (bizcall).
+            mk(NaiveDate::from_ymd_opt(2026, 7, 7).unwrap(), SourceId::ClaudeCode, "meterly", 300),
+            mk(NaiveDate::from_ymd_opt(2026, 7, 9).unwrap(), SourceId::Codex, "bizcall", 100),
+            // Previous week total 200 → +100% delta.
+            mk(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(), SourceId::ClaudeCode, "meterly", 200),
+            // This week (after monday) must be excluded.
+            mk(NaiveDate::from_ymd_opt(2026, 7, 14).unwrap(), SourceId::ClaudeCode, "meterly", 999),
+        ];
+        let refs: Vec<&DailyBucket> = owned.iter().collect();
+        let body = weekly_report_body(&refs, monday).expect("report");
+        assert!(body.contains("Claude 300"), "{body}");
+        assert!(body.contains("Codex 100"), "{body}");
+        assert!(body.contains("+100%"), "{body}");
+        assert!(body.contains("최다 프로젝트 meterly"), "{body}");
+        // Empty week → no report.
+        assert!(weekly_report_body(&[], monday).is_none());
+    }
+
+    #[test]
+    fn normalize_thresholds_sorts_dedups_clamps() {
+        assert_eq!(normalize_thresholds(&[90, 30, 50, 30, 0]), vec![30, 50, 90]);
+        // Empty / all-invalid falls back to the defaults.
+        assert_eq!(normalize_thresholds(&[]), DEFAULT_LIMIT_THRESHOLDS.to_vec());
+        assert_eq!(normalize_thresholds(&[0]), DEFAULT_LIMIT_THRESHOLDS.to_vec());
     }
 
     fn source(id: SourceId, rate_limit: RateLimitStatus) -> SourceSummary {

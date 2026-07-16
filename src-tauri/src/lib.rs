@@ -82,6 +82,50 @@ fn update_scan(handle: &AppHandle) {
     }
 }
 
+/// Warn (once, at startup) when the app runs from a location where the
+/// auto-updater cannot replace it — macOS App Translocation (launched from
+/// Downloads/DMG without moving) or any read-only bundle. Field failure:
+/// "업데이트 설치에 실패했습니다. Read-only file system (os error 30)".
+#[cfg(target_os = "macos")]
+fn check_app_location(handle: &AppHandle) {
+    use tauri_plugin_dialog::DialogExt;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let translocated = exe.to_string_lossy().contains("/AppTranslocation/");
+    // <bundle>.app/Contents/MacOS/<exe> → ancestor(3) is the .app bundle.
+    let writable = exe.ancestors().nth(3).map_or(true, |app_dir| {
+        let probe = app_dir.join(".meterly-write-probe");
+        match std::fs::OpenOptions::new().create(true).write(true).open(&probe) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    });
+    if !translocated && writable {
+        return;
+    }
+    crate::logging::warn(&format!(
+        "app location not updatable (translocated: {translocated}, writable: {writable}) — {}",
+        exe.display()
+    ));
+    let handle = handle.clone();
+    std::thread::spawn(move || {
+        handle
+            .dialog()
+            .message(
+                "meterly가 읽기 전용 위치에서 실행 중이라 자동 업데이트가 동작하지 \
+                 않습니다.\n\nmeterly를 종료한 뒤 '응용 프로그램' 폴더로 옮기고 \
+                 다시 실행해 주세요.",
+            )
+            .title("meterly 위치 안내")
+            .blocking_show();
+    });
+}
+
 /// Toggle the popover window: hide when visible, otherwise position it near
 /// the tray icon and show it.
 fn toggle_popover(app: &AppHandle) {
@@ -164,9 +208,20 @@ pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
                     }
                     Err(err) => {
                         crate::logging::error(&format!("update install failed: {err}"));
+                        let msg = err.to_string();
+                        let body = if msg.contains("os error 30")
+                            || msg.to_lowercase().contains("read-only")
+                        {
+                            "업데이트 설치에 실패했습니다.\n\nmeterly가 읽기 전용 \
+                             위치에서 실행 중입니다. meterly를 종료한 뒤 '응용 프로그램' \
+                             폴더로 옮기고 다시 시도해 주세요."
+                                .to_string()
+                        } else {
+                            format!("업데이트 설치에 실패했습니다.\n{err}")
+                        };
                         handle
                             .dialog()
-                            .message(format!("업데이트 설치에 실패했습니다.\n{err}"))
+                            .message(body)
                             .title("meterly 업데이트")
                             .blocking_show();
                     }
@@ -225,6 +280,8 @@ pub fn run() {
             commands::set_tray_display,
             commands::set_autostart,
             commands::set_alerts_enabled,
+            commands::set_alert_thresholds,
+            commands::set_percent_display,
             commands::set_monthly_budget,
             commands::set_date_format,
             commands::pick_sync_folder,
@@ -246,6 +303,10 @@ pub fn run() {
                 app.package_info().version,
                 std::env::consts::OS
             ));
+
+            // Warn early when the app can't self-update from where it runs.
+            #[cfg(target_os = "macos")]
+            check_app_location(&app.handle().clone());
 
             // Tray menu: 설정 / 대시보드 / 새로고침 / 종료. Detailed controls
             // (display mode, autostart, sync folder, updates) live in the
