@@ -488,8 +488,18 @@ impl Engine {
                 if !matches!(s.health, SourceHealth::Ok) {
                     crate::logging::warn(&format!("{} health: {health}", s.id.as_str()));
                 }
+                // Also surface whether the live plan-limit % is captured — this
+                // is the "Codex 현재 상태 안 잡힘" signal ("limit=n/a" = missing).
+                let limit = match &s.rate_limit {
+                    RateLimitStatus::Measured { primary_used_percent, .. } => {
+                        format!("{primary_used_percent:.0}%")
+                    }
+                    RateLimitStatus::Cli { .. } => "cli".to_string(),
+                    RateLimitStatus::Estimated { .. } => "est".to_string(),
+                    RateLimitStatus::Unavailable => "n/a".to_string(),
+                };
                 format!(
-                    "{}={}tok/{health}",
+                    "{}={}tok/{health}/limit={limit}",
                     s.id.as_str(),
                     format_tokens(s.today_tokens.total)
                 )

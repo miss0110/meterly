@@ -67,6 +67,10 @@ fn handshake_lines() -> String {
 /// malformed reply) so the caller can fall back.
 pub fn fetch() -> RateLimitStatus {
     let Some(bin) = codex_binary() else {
+        crate::logging::warn(
+            "codex usage: `codex` binary not found (checked ~/.local/bin, \
+             /opt/homebrew/bin, /usr/local/bin, /usr/bin; set METERLY_CODEX_BIN to override)",
+        );
         return RateLimitStatus::Unavailable;
     };
     // Hardening for a background, GUI-launched context (see module docs):
@@ -88,7 +92,10 @@ pub fn fetch() -> RateLimitStatus {
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(_) => return RateLimitStatus::Unavailable,
+        Err(err) => {
+            crate::logging::warn(&format!("codex usage: failed to spawn app-server: {err}"));
+            return RateLimitStatus::Unavailable;
+        }
     };
 
     // Keep stdin open until we have the reply — closing it early makes the
@@ -125,8 +132,33 @@ pub fn fetch() -> RateLimitStatus {
     }
 
     let outcome = match rx.recv_timeout(Duration::from_secs(TIMEOUT_SECS)) {
-        Ok(v) => parse_rate_limits(&v),
-        Err(_) => RateLimitStatus::Unavailable,
+        Ok(v) => {
+            let parsed = parse_rate_limits(&v);
+            match &parsed {
+                RateLimitStatus::Measured { primary_used_percent, .. } => {
+                    crate::logging::info(&format!(
+                        "codex app-server: rate limits ok ({primary_used_percent:.0}%)"
+                    ));
+                }
+                _ => {
+                    // Got a reply but no usable rateLimits — often "not signed
+                    // in to Codex" or an API/version change.
+                    let hint = v
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("no rateLimits in reply (signed in to Codex?)");
+                    crate::logging::warn(&format!("codex app-server: {hint}"));
+                }
+            }
+            parsed
+        }
+        Err(_) => {
+            crate::logging::warn(&format!(
+                "codex app-server: no reply within {TIMEOUT_SECS}s"
+            ));
+            RateLimitStatus::Unavailable
+        }
     };
     // The app-server is long-lived; we're done with it.
     let _ = child.kill();

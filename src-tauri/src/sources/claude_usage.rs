@@ -53,6 +53,10 @@ fn claude_binary() -> Option<PathBuf> {
 /// so the caller can fall back to the estimate.
 pub fn fetch() -> RateLimitStatus {
     let Some(bin) = claude_binary() else {
+        crate::logging::warn(
+            "claude usage: `claude` binary not found (checked ~/.local/bin, \
+             /opt/homebrew/bin, /usr/local/bin, /usr/bin; set METERLY_CLAUDE_BIN to override)",
+        );
         return RateLimitStatus::Unavailable;
     };
     // Run in a neutral temp cwd: a Finder-launched app inherits cwd `/`, and
@@ -78,6 +82,9 @@ pub fn fetch() -> RateLimitStatus {
                 if start.elapsed() > Duration::from_secs(TIMEOUT_SECS) {
                     let _ = child.kill();
                     let _ = child.wait();
+                    crate::logging::warn(&format!(
+                        "claude usage: `claude -p /usage` timed out after {TIMEOUT_SECS}s"
+                    ));
                     return RateLimitStatus::Unavailable;
                 }
                 std::thread::sleep(Duration::from_millis(100));
