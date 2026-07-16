@@ -5,6 +5,7 @@ pub mod commands;
 pub mod devicesync;
 pub mod logging;
 pub mod model;
+pub mod orgreport;
 pub mod pricing;
 pub mod scheduler;
 pub mod sources;
@@ -289,7 +290,11 @@ pub fn run() {
             commands::check_for_updates,
             commands::open_settings,
             commands::open_log_dir,
-            commands::get_update_status
+            commands::get_update_status,
+            commands::get_org_status,
+            commands::set_org_config,
+            commands::org_register,
+            commands::org_disable
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.

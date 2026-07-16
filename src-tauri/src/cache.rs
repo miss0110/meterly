@@ -86,6 +86,20 @@ pub struct CacheV1 {
     /// Monday of the week the last weekly report was sent for (dedup).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_weekly_report: Option<chrono::NaiveDate>,
+    /// Org reporting (Settings values; a managed file overrides url/token).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_token: Option<String>,
+    /// Personal identifier (e.g. 사번) the org told the user to enter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_user_id: Option<String>,
+    /// Set after a successful /register — reporting only runs when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub org_registered: bool,
+    /// Last successful /usage report (throttles to the report interval).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_org_report: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

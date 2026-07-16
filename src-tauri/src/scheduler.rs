@@ -238,7 +238,7 @@ fn device_range_usage(
 /// label. Keying by hostname (not a random id) means relaunching or
 /// reinstalling on the same machine reuses its file instead of orphaning the
 /// old one and double-counting.
-fn hostname() -> String {
+pub fn hostname() -> String {
     #[cfg(target_os = "windows")]
     let h = std::env::var("COMPUTERNAME").ok();
     #[cfg(not(target_os = "windows"))]
@@ -1168,6 +1168,7 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .show();
     }
     publish_tray_and_emit(app, &summary);
+    org_report_tick(app);
     Some(summary)
 }
 
@@ -1215,6 +1216,54 @@ fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
     apply_tray_title(app, &snapshot);
 
     let _ = app.emit("usage-updated", summary);
+}
+
+/// Org usage reporting tick: when an org config exists and the device is
+/// registered, POST a usage snapshot once per report interval. The payload is
+/// built under the engine lock; the HTTP call runs without it.
+fn org_report_tick(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let (cfg, payload) = {
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(cfg) = crate::orgreport::resolve(&engine.cache) else {
+            return;
+        };
+        if !engine.cache.org_registered {
+            return; // registration (Settings button) hasn't happened yet
+        }
+        let due = engine.cache.last_org_report.map_or(true, |at| {
+            (Utc::now() - at).num_seconds() >= crate::orgreport::REPORT_INTERVAL_SECS
+        });
+        if !due {
+            return;
+        }
+        let payload = crate::orgreport::UsagePayload {
+            schema: 1,
+            user_id: cfg.user_id.clone(),
+            hostname: hostname(),
+            app_version: app.package_info().version.to_string(),
+            reported_at: Utc::now(),
+            daily: crate::orgreport::merge_rows(&engine.all_buckets()),
+        };
+        (cfg, payload)
+    };
+
+    match crate::orgreport::report(&cfg, &payload) {
+        Ok(()) => {
+            crate::logging::info(&format!(
+                "org report: {} rows sent to {}",
+                payload.daily.len(),
+                cfg.url
+            ));
+            let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            engine.cache.last_org_report = Some(Utc::now());
+            engine.save_cache_best_effort();
+        }
+        Err(err) => {
+            // Keep last_org_report unchanged → retried next refresh cycle.
+            crate::logging::warn(&format!("org report failed: {err}"));
+        }
+    }
 }
 
 /// Re-emit the current summary + rebuild the tray WITHOUT rescanning — for

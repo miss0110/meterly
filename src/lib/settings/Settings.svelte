@@ -13,14 +13,62 @@
     clearSyncFolder,
     checkForUpdates,
     openLogDir,
+    getOrgStatus,
+    setOrgConfig,
+    orgRegister,
+    orgDisable,
     type SettingsData,
+    type OrgStatus,
   } from "../ipc";
 
   let s = $state<SettingsData | null>(null);
+  let org = $state<OrgStatus | null>(null);
+  // Local inputs for the org section (committed on 등록).
+  let orgUrl = $state("");
+  let orgToken = $state("");
+  let orgId = $state("");
+  let orgMsg = $state("");
+  let orgBusy = $state(false);
+
+  function loadOrg() {
+    getOrgStatus()
+      .then((o) => {
+        org = o;
+        orgUrl = o.url ?? "";
+        orgId = o.user_id ?? "";
+      })
+      .catch(() => {});
+  }
 
   onMount(() => {
     getSettings().then((v) => (s = v));
+    loadOrg();
   });
+
+  async function registerOrg() {
+    orgBusy = true;
+    orgMsg = "";
+    try {
+      await setOrgConfig(
+        org?.managed ? null : orgUrl,
+        org?.managed ? null : orgToken || null,
+        orgId,
+      );
+      await orgRegister();
+      orgMsg = "등록 완료 — 이후 자동으로 전송됩니다";
+      loadOrg();
+    } catch (e) {
+      orgMsg = `등록 실패: ${e}`;
+    } finally {
+      orgBusy = false;
+    }
+  }
+  async function disableOrg() {
+    await orgDisable();
+    orgMsg = "";
+    orgToken = "";
+    loadOrg();
+  }
 
   const DISPLAY = [
     { id: "tokens", label: "사용량·비용 표시 (순환)" },
@@ -185,6 +233,53 @@
     </section>
 
     <section>
+      <h2>조직 리포팅 <span class="muted">(선택)</span></h2>
+      <p class="muted small">
+        회사에서 사용량 수집을 운영하는 경우에만 설정하세요. 등록하면 일별 토큰
+        사용량(날짜·도구·모델)만 주기적으로 전송됩니다 — 프롬프트·코드·프로젝트명은
+        전송하지 않습니다.
+      </p>
+      {#if org?.managed}
+        <div class="path">{org.url} <span class="muted small">(IT 관리 설정)</span></div>
+      {:else}
+        <input
+          class="org-input"
+          type="url"
+          placeholder="수집 서버 URL (예: https://collect.example.com)"
+          bind:value={orgUrl}
+        />
+        <input
+          class="org-input"
+          type="password"
+          placeholder="토큰 (선택)"
+          bind:value={orgToken}
+        />
+      {/if}
+      <input
+        class="org-input"
+        type="text"
+        placeholder="식별자 (사번 등, 조직 가이드에 따라 입력)"
+        bind:value={orgId}
+      />
+      <div class="btn-row">
+        <button onclick={registerOrg} disabled={orgBusy || !orgId || (!org?.managed && !orgUrl)}>
+          {orgBusy ? "등록 중…" : org?.registered ? "다시 등록" : "등록"}
+        </button>
+        {#if org?.registered || org?.url}
+          <button class="ghost" onclick={disableOrg}>해제</button>
+        {/if}
+        {#if org?.registered}
+          <span class="muted small">
+            등록됨{org.last_report ? ` · 마지막 전송 ${new Date(org.last_report).toLocaleString()}` : " · 첫 전송 대기"}
+          </span>
+        {/if}
+      </div>
+      {#if orgMsg}
+        <p class="small" class:err={orgMsg.startsWith("등록 실패")}>{orgMsg}</p>
+      {/if}
+    </section>
+
+    <section>
       <h2>진단</h2>
       <p class="muted small">
         문제가 있을 때 참고할 로그를 이 기기에 일 단위로 최대 7일 보관합니다.
@@ -327,5 +422,19 @@
   .budget .unit {
     font-size: 0.8rem;
     color: color-mix(in srgb, CanvasText 55%, transparent);
+  }
+  .org-input {
+    font: inherit;
+    font-size: 0.85rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    color: inherit;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .err {
+    color: #e0524f;
   }
 </style>

@@ -198,6 +198,24 @@ export const onUsageUpdated = (
 /** Available-update version from the background scan (null = up to date). */
 export const getUpdateStatus = () =>
   invoke<string | null>("get_update_status");
+
+// ---- Org reporting (optional; personal use unaffected) ----
+export interface OrgStatus {
+  url: string | null;
+  /** True when url/token come from an IT-managed file (read-only in UI). */
+  managed: boolean;
+  user_id: string | null;
+  registered: boolean;
+  last_report: string | null;
+}
+export const getOrgStatus = () => invoke<OrgStatus>("get_org_status");
+export const setOrgConfig = (
+  url: string | null,
+  token: string | null,
+  userId: string | null,
+) => invoke<void>("set_org_config", { url, token, userId });
+export const orgRegister = () => invoke<void>("org_register");
+export const orgDisable = () => invoke<void>("org_disable");
 export const onUpdateAvailable = (
   handler: (version: string) => void,
 ): Promise<UnlistenFn> =>
