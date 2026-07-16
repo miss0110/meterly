@@ -155,8 +155,11 @@ export interface SettingsData {
   autostart: boolean;
   sync_dir: string | null;
   alerts_enabled: boolean;
+  /** Alert thresholds (percent, ascending) — default [30, 50, 70, 90]. */
+  alert_thresholds: number[];
   monthly_budget_tokens: number | null;
   date_format: string; // "auto" | "iso" | "us" | "eu"
+  percent_display: string; // "used" | "remaining"
 }
 export const getSettings = () => invoke<SettingsData>("get_settings");
 export const setTrayDisplay = (mode: string) =>
@@ -165,6 +168,10 @@ export const setAutostart = (enabled: boolean) =>
   invoke<void>("set_autostart", { enabled });
 export const setAlertsEnabled = (enabled: boolean) =>
   invoke<void>("set_alerts_enabled", { enabled });
+export const setAlertThresholds = (thresholds: number[]) =>
+  invoke<void>("set_alert_thresholds", { thresholds });
+export const setPercentDisplay = (mode: string) =>
+  invoke<void>("set_percent_display", { mode });
 export const setMonthlyBudget = (tokens: number) =>
   invoke<void>("set_monthly_budget", { tokens });
 export const setDateFormat = (format: string) =>

@@ -5,6 +5,8 @@
     setTrayDisplay,
     setAutostart,
     setAlertsEnabled,
+    setAlertThresholds,
+    setPercentDisplay,
     setMonthlyBudget,
     setDateFormat,
     pickSyncFolder,
@@ -40,6 +42,23 @@
     const enabled = (e.currentTarget as HTMLInputElement).checked;
     if (s) s.alerts_enabled = enabled;
     void setAlertsEnabled(enabled);
+  }
+  // "30, 50, 70, 90" → sanitized int list (backend re-normalizes too).
+  function saveThresholds(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const parsed = input.value
+      .split(/[,\s]+/)
+      .map((t) => parseInt(t, 10))
+      .filter((n) => Number.isFinite(n) && n >= 1 && n <= 100);
+    const cleaned = [...new Set(parsed)].sort((a, b) => a - b);
+    if (s) s.alert_thresholds = cleaned.length ? cleaned : [30, 50, 70, 90];
+    input.value = (s?.alert_thresholds ?? cleaned).join(", ");
+    void setAlertThresholds(cleaned);
+  }
+  function choosePercentDisplay(e: Event) {
+    const mode = (e.currentTarget as HTMLSelectElement).value;
+    if (s) s.percent_display = mode;
+    void setPercentDisplay(mode);
   }
   const DATE_FORMATS = [
     { id: "auto", label: "자동 (지역 표준)" },
@@ -100,7 +119,24 @@
       </label>
       <label class="row-toggle">
         <input type="checkbox" checked={s.alerts_enabled} onchange={toggleAlerts} />
-        한도 사용률 알림 (30 · 50 · 70 · 90%)
+        한도 사용률 알림 · 주간 리포트
+      </label>
+      <label class="row-select">
+        알림 임계치 (%)
+        <input
+          class="thresholds"
+          type="text"
+          value={s.alert_thresholds.join(", ")}
+          placeholder="30, 50, 70, 90"
+          onchange={saveThresholds}
+        />
+      </label>
+      <label class="row-select">
+        한도 표시 방식
+        <select value={s.percent_display} onchange={choosePercentDisplay}>
+          <option value="used">사용한 양</option>
+          <option value="remaining">남은 양</option>
+        </select>
       </label>
       <label class="row-select">
         날짜 표시 형식
@@ -170,13 +206,15 @@
 
 <style>
   .settings {
-    padding: 1.1rem 1.3rem;
+    padding: 1.1rem 1.3rem 2rem;
     display: flex;
     flex-direction: column;
     gap: 1.1rem;
     height: 100%;
     box-sizing: border-box;
     font-size: 13px;
+    /* Settings grew past the window height — scroll, keeping the bottom pad. */
+    overflow-y: auto;
   }
   h1 {
     margin: 0;
@@ -221,6 +259,17 @@
     background: color-mix(in srgb, CanvasText 6%, transparent);
     color: inherit;
     cursor: pointer;
+  }
+  .thresholds {
+    width: 9rem;
+    font: inherit;
+    font-size: 0.85rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    color: inherit;
+    text-align: right;
   }
   .muted {
     color: color-mix(in srgb, CanvasText 55%, transparent);

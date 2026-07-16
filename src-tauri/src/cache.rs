@@ -65,6 +65,9 @@ pub struct CacheV1 {
     /// Whether plan-usage threshold notifications fire. `None` = default (on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts_enabled: Option<bool>,
+    /// Custom alert thresholds (percent, ascending). `None` = default 30/50/70/90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_thresholds: Option<Vec<u8>>,
     /// Optional monthly token budget (raw tokens). Drives the dashboard's
     /// this-month progress bar + month-end projection. `None` = no budget set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +80,12 @@ pub struct CacheV1 {
     /// version, surviving restarts (the popover banner still shows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_notified_update: Option<String>,
+    /// Limit-gauge display: "used" (사용한 양, default) | "remaining" (남은 양).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_display: Option<String>,
+    /// Monday of the week the last weekly report was sent for (dedup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_weekly_report: Option<chrono::NaiveDate>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

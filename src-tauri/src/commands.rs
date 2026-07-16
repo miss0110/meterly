@@ -75,8 +75,10 @@ pub struct SettingsData {
     autostart: bool,
     sync_dir: Option<String>,
     alerts_enabled: bool,
+    alert_thresholds: Vec<u8>,
     monthly_budget_tokens: Option<u64>,
     date_format: String,
+    percent_display: String,
 }
 
 /// Current values for the settings window.
@@ -90,13 +92,36 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         sync_dir: engine.cache.sync_dir.clone(),
         alerts_enabled: engine.cache.alerts_enabled.unwrap_or(true),
+        alert_thresholds: engine
+            .cache
+            .alert_thresholds
+            .as_deref()
+            .map(crate::scheduler::normalize_thresholds)
+            .unwrap_or_else(|| crate::scheduler::DEFAULT_LIMIT_THRESHOLDS.to_vec()),
         monthly_budget_tokens: engine.cache.monthly_budget_tokens,
         date_format: engine
             .cache
             .date_format
             .clone()
             .unwrap_or_else(|| "auto".to_string()),
+        percent_display: engine
+            .cache
+            .percent_display
+            .clone()
+            .unwrap_or_else(|| "used".to_string()),
     }
+}
+
+/// Set custom alert thresholds (empty array = reset to defaults).
+#[tauri::command]
+pub fn set_alert_thresholds(app: AppHandle, thresholds: Vec<u8>) {
+    crate::scheduler::set_alert_thresholds(&app, thresholds);
+}
+
+/// Limit-gauge display: "used" (사용한 양) | "remaining" (남은 양).
+#[tauri::command]
+pub fn set_percent_display(app: AppHandle, mode: String) {
+    crate::scheduler::set_percent_display(&app, mode);
 }
 
 /// Toggle plan-usage threshold notifications (30/50/70/90%).
