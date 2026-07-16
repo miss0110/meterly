@@ -67,6 +67,11 @@ export function formatResetLabel(
   fmt: DateFormat = "auto",
 ): string | null {
   if (!label) return label;
+  // New source: ISO timestamp from Claude Code's cachedUsageUtilization.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(label)) {
+    const d = new Date(label);
+    if (!Number.isNaN(d.getTime())) return formatResetDate(d, fmt);
+  }
   const m = label.match(
     /([A-Za-z]{3})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i,
   );
