@@ -4,6 +4,9 @@
     getSummary,
     getDevices,
     getSettings,
+    getUpdateStatus,
+    onUpdateAvailable,
+    checkForUpdates,
     refreshNow,
     openDashboard,
     onUsageUpdated,
@@ -40,6 +43,8 @@
   // Date-format preference (Settings). Re-read on each refresh so a change in
   // the Settings window applies without an app restart.
   let dateFmt = $state<DateFormat>("auto");
+  // Available-update version from the background scan (null = up to date).
+  let updateVersion = $state<string | null>(null);
 
   function loadDevices() {
     getDevices()
@@ -56,13 +61,18 @@
     getSummary().then((s) => (summary = s));
     loadDevices();
     loadDateFmt();
+    getUpdateStatus()
+      .then((v) => (updateVersion = v))
+      .catch(() => {});
     const unlisten = onUsageUpdated((s) => {
       summary = s;
       loadDevices();
       loadDateFmt();
     });
+    const unlistenUpdate = onUpdateAvailable((v) => (updateVersion = v));
     return () => {
       unlisten.then((fn) => fn());
+      unlistenUpdate.then((fn) => fn());
     };
   });
 
@@ -242,6 +252,16 @@
     </div>
   </header>
 
+  {#if updateVersion}
+    <button
+      class="update-banner"
+      title="클릭하면 설치 안내가 열립니다"
+      onclick={() => checkForUpdates()}
+    >
+      ↑ 새 버전 v{updateVersion} 업데이트 가능 — 설치하기
+    </button>
+  {/if}
+
   <div class="body">
   {#if summary === null}
     <p class="muted center">불러오는 중…</p>
@@ -394,6 +414,23 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  /* Update banner — pinned under the header, above the scrolling body. */
+  .update-banner {
+    flex: 0 0 auto;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-align: center;
+    padding: 0.45rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, #4f8ef7 55%, transparent);
+    background: color-mix(in srgb, #4f8ef7 16%, transparent);
+    color: inherit;
+    cursor: pointer;
+  }
+  .update-banner:hover {
+    background: color-mix(in srgb, #4f8ef7 26%, transparent);
   }
   /* Card identity zone: name (left) + sparkline & big token figure (right),
      then the account on its own full-width line so the email isn't boxed

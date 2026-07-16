@@ -68,8 +68,10 @@ export function formatResetLabel(
 ): string | null {
   if (!label) return label;
   // New source: ISO timestamp from Claude Code's cachedUsageUtilization.
+  // WKWebView rejects fractional seconds longer than 3 digits (the source has
+  // microseconds), so truncate the fraction before parsing.
   if (/^\d{4}-\d{2}-\d{2}T/.test(label)) {
-    const d = new Date(label);
+    const d = new Date(label.replace(/\.(\d{3})\d+/, ".$1"));
     if (!Number.isNaN(d.getTime())) return formatResetDate(d, fmt);
   }
   const m = label.match(

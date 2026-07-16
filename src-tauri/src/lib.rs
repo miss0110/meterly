@@ -12,10 +12,75 @@ pub mod sources;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_positioner::{Position, WindowExt};
+
+/// Latest known available update version (e.g. "0.1.14"), set by the periodic
+/// scan. `None` = up to date (or not checked yet). Drives the popover banner.
+pub struct UpdateState(pub std::sync::Mutex<Option<String>>);
+
+/// Seconds between background update scans.
+const UPDATE_SCAN_INTERVAL_SECS: u64 = 6 * 3600;
+
+/// Quiet background update check: no dialogs. When a newer version exists,
+/// remember it (popover banner via `get_update_status` / "update-available"
+/// event) and notify once per version (dedup persisted in the cache).
+/// `METERLY_FAKE_UPDATE=<ver>` fakes an available update for dev testing.
+fn update_scan(handle: &AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    use tauri_plugin_updater::UpdaterExt;
+
+    let found: Option<String> = if let Ok(v) = std::env::var("METERLY_FAKE_UPDATE") {
+        Some(v)
+    } else {
+        let Ok(updater) = handle.updater() else {
+            return;
+        };
+        match tauri::async_runtime::block_on(updater.check()) {
+            Ok(Some(update)) => Some(update.version.clone()),
+            Ok(None) => None,
+            Err(err) => {
+                crate::logging::warn(&format!("update scan failed: {err}"));
+                return; // keep previous state on transient failure
+            }
+        }
+    };
+
+    {
+        let state = handle.state::<UpdateState>();
+        *state.0.lock().unwrap_or_else(|e| e.into_inner()) = found.clone();
+    }
+    let Some(version) = found else {
+        return;
+    };
+    crate::logging::info(&format!("update scan: v{version} available"));
+    let _ = handle.emit("update-available", &version);
+
+    // Notify once per version across restarts.
+    let already = {
+        let state = handle.state::<crate::scheduler::AppState>();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if engine.cache.last_notified_update.as_deref() == Some(version.as_str()) {
+            true
+        } else {
+            engine.cache.last_notified_update = Some(version.clone());
+            engine.save_cache_best_effort();
+            false
+        }
+    };
+    if !already {
+        let _ = handle
+            .notification()
+            .builder()
+            .title("meterly 업데이트")
+            .body(format!(
+                "새 버전 v{version}이(가) 있습니다. 메뉴바 팝오버에서 설치할 수 있어요."
+            ))
+            .show();
+    }
+}
 
 /// Toggle the popover window: hide when visible, otherwise position it near
 /// the tray icon and show it.
@@ -147,6 +212,7 @@ pub fn run() {
         .manage(scheduler::TrayRotation(std::sync::Mutex::new(
             Default::default(),
         )))
+        .manage(UpdateState(std::sync::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::get_summary,
             commands::get_dashboard,
@@ -165,7 +231,8 @@ pub fn run() {
             commands::clear_sync_folder,
             commands::check_for_updates,
             commands::open_settings,
-            commands::open_log_dir
+            commands::open_log_dir,
+            commands::get_update_status
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.
@@ -238,10 +305,19 @@ pub fn run() {
             // immediately, so the tray title fills in shortly after launch.
             scheduler::start(app.handle().clone());
 
-            // Quiet update check on launch (release only) — prompts the user
-            // only when a newer version exists; silent otherwise.
-            #[cfg(not(debug_assertions))]
-            check_updates(app.handle().clone(), false);
+            // Periodic quiet update scan (launch + every 6h): no dialogs —
+            // an available update surfaces as a popover banner + one native
+            // notification per version. Install runs when the user clicks.
+            let scan_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                loop {
+                    update_scan(&scan_handle);
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        UPDATE_SCAN_INTERVAL_SECS,
+                    ));
+                }
+            });
 
             // Debug/screenshot helper: METERLY_SHOW=dashboard,popover shows
             // the named windows on launch (normally tray-only).
