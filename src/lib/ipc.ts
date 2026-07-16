@@ -210,8 +210,12 @@ export interface OrgStatus {
   /** Reporting cadence in seconds (fixed). */
   interval_secs: number;
   hostname: string;
+  /** Sources included in reports ("claude_code" | "codex"). */
+  sources: string[];
 }
 export const getOrgStatus = () => invoke<OrgStatus>("get_org_status");
+export const setOrgSources = (sources: string[]) =>
+  invoke<void>("set_org_sources", { sources });
 /** Send a usage report immediately; resolves to the number of rows sent. */
 export const orgReportNow = () => invoke<number>("org_report_now");
 export const setOrgConfig = (

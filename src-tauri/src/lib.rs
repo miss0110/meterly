@@ -294,6 +294,7 @@ pub fn run() {
             commands::get_org_status,
             commands::set_org_config,
             commands::org_register,
+            commands::set_org_sources,
             commands::org_report_now,
             commands::org_disable
         ])

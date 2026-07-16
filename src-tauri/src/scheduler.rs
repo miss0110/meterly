@@ -1230,13 +1230,24 @@ pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
         if !engine.cache.org_registered {
             return Err("먼저 등록하세요".into());
         }
+        // Only the sources the user opted to share (None = all).
+        let allowed = engine.cache.org_sources.clone();
+        let buckets: Vec<&DailyBucket> = engine
+            .all_buckets()
+            .into_iter()
+            .filter(|b| {
+                allowed
+                    .as_ref()
+                    .map_or(true, |a| a.iter().any(|s| s == b.source.as_str()))
+            })
+            .collect();
         let payload = crate::orgreport::UsagePayload {
             schema: 1,
             user_id: cfg.user_id.clone(),
             hostname: hostname(),
             app_version: app.package_info().version.to_string(),
             reported_at: Utc::now(),
-            daily: crate::orgreport::merge_rows(&engine.all_buckets()),
+            daily: crate::orgreport::merge_rows(&buckets),
         };
         (cfg, payload)
     };

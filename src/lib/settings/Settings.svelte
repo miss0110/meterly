@@ -15,6 +15,7 @@
     openLogDir,
     getOrgStatus,
     setOrgConfig,
+    setOrgSources,
     orgRegister,
     orgReportNow,
     orgDisable,
@@ -40,14 +41,33 @@
   let orgMsg = $state("");
   let orgBusy = $state(false);
 
+  const ORG_SOURCES = [
+    { id: "claude_code", label: "Claude Code" },
+    { id: "codex", label: "Codex" },
+  ];
+  let orgSources = $state<string[]>(["claude_code", "codex"]);
+
   function loadOrg() {
     getOrgStatus()
       .then((o) => {
         org = o;
         orgUrl = o.url ?? "";
         orgId = o.user_id ?? "";
+        orgSources = o.sources;
       })
       .catch(() => {});
+  }
+
+  // At least one source must stay selected (an empty report is pointless).
+  function toggleOrgSource(id: string, e: Event) {
+    const on = (e.currentTarget as HTMLInputElement).checked;
+    const next = on ? [...new Set([...orgSources, id])] : orgSources.filter((s) => s !== id);
+    if (next.length === 0) {
+      (e.currentTarget as HTMLInputElement).checked = true;
+      return;
+    }
+    orgSources = next;
+    void setOrgSources(next);
   }
 
   onMount(() => {
@@ -312,6 +332,19 @@
           placeholder="식별자 (사번 등, 조직 가이드에 따라 입력)"
           bind:value={orgId}
         />
+        <div class="src-row">
+          <span class="muted small">전송할 도구</span>
+          {#each ORG_SOURCES as src (src.id)}
+            <label class="row-toggle small">
+              <input
+                type="checkbox"
+                checked={orgSources.includes(src.id)}
+                onchange={(e) => toggleOrgSource(src.id, e)}
+              />
+              {src.label}
+            </label>
+          {/each}
+        </div>
         <div class="btn-row">
           <button onclick={registerOrg} disabled={orgBusy || !orgId || (!org?.managed && !orgUrl)}>
             {orgBusy ? "처리 중…" : org?.registered ? "다시 등록" : "등록"}
@@ -347,6 +380,14 @@
             <div class="st-row">
               <span class="st-key">다음 전송</span>
               <span>{nextReport(org)}</span>
+            </div>
+            <div class="st-row">
+              <span class="st-key">전송 도구</span>
+              <span>
+                {ORG_SOURCES.filter((x) => orgSources.includes(x.id))
+                  .map((x) => x.label)
+                  .join(" · ")}
+              </span>
             </div>
             <div class="st-row">
               <span class="st-key">전송 대상</span>
@@ -560,6 +601,11 @@
   }
   .err {
     color: #e0524f;
+  }
+  .src-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
   }
   /* Org reporting status panel. */
   .org-status {

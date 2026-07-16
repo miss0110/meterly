@@ -202,6 +202,8 @@ pub struct OrgStatus {
     interval_secs: i64,
     /// This device's hostname (sent alongside the identifier).
     hostname: String,
+    /// Sources included in reports (resolved; default = all known sources).
+    sources: Vec<String>,
 }
 
 #[tauri::command]
@@ -220,7 +222,28 @@ pub fn get_org_status(state: State<'_, AppState>) -> OrgStatus {
         last_report: engine.cache.last_org_report,
         interval_secs: crate::orgreport::REPORT_INTERVAL_SECS,
         hostname: crate::scheduler::hostname(),
+        sources: engine
+            .cache
+            .org_sources
+            .clone()
+            .unwrap_or_else(|| vec!["claude_code".into(), "codex".into()]),
     }
+}
+
+/// Choose which sources are included in org reports. Unknown ids are dropped;
+/// an empty (or all-unknown) list resets to "all". Takes effect on the next
+/// report — no re-registration needed.
+#[tauri::command]
+pub fn set_org_sources(state: State<'_, AppState>, sources: Vec<String>) {
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let known = ["claude_code", "codex"];
+    let mut cleaned: Vec<String> = sources
+        .into_iter()
+        .filter(|s| known.contains(&s.as_str()))
+        .collect();
+    cleaned.dedup();
+    engine.cache.org_sources = if cleaned.is_empty() { None } else { Some(cleaned) };
+    engine.save_cache_best_effort();
 }
 
 /// Send a usage report immediately (Settings "지금 전송" — connectivity check).
@@ -281,6 +304,7 @@ pub fn org_disable(state: State<'_, AppState>) {
     engine.cache.org_token = None;
     engine.cache.org_user_id = None;
     engine.cache.org_registered = false;
+    engine.cache.org_sources = None;
     engine.cache.last_org_report = None;
     engine.save_cache_best_effort();
 }

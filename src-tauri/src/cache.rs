@@ -97,6 +97,9 @@ pub struct CacheV1 {
     /// Set after a successful /register — reporting only runs when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub org_registered: bool,
+    /// Sources included in org reports ("claude_code"/"codex"). `None` = all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_sources: Option<Vec<String>>,
     /// Last successful /usage report (throttles to the report interval).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_org_report: Option<chrono::DateTime<chrono::Utc>>,
