@@ -404,7 +404,10 @@ impl Engine {
                 }
             }));
             if result.is_err() {
-                eprintln!("meterly: source {:?} panicked during scan (isolated)", rt.id);
+                crate::logging::error(&format!(
+                    "source {:?} panicked during scan (isolated)",
+                    rt.id
+                ));
             }
         }
 
@@ -460,14 +463,50 @@ impl Engine {
                 daily: self.all_buckets().into_iter().cloned().collect(),
             };
             if let Err(err) = crate::devicesync::write(std::path::Path::new(&dir), &file) {
-                eprintln!("meterly: device usage write failed: {err}");
+                crate::logging::warn(&format!("device usage write failed: {err}"));
             }
         }
 
         if let Err(err) = cache::save(&self.cache_path, &self.cache) {
-            eprintln!("meterly: cache save failed: {err}");
+            crate::logging::warn(&format!("cache save failed: {err}"));
         }
-        self.summary()
+
+        let summary = self.summary();
+        // Compact per-cycle line — the main signal for "is it collecting?" on a
+        // user's machine. Unhealthy sources are called out at WARN.
+        let parts: Vec<String> = summary
+            .sources
+            .iter()
+            .map(|s| {
+                let health = match &s.health {
+                    SourceHealth::Ok => "ok".to_string(),
+                    SourceHealth::Partial { skipped_lines, .. } => {
+                        format!("partial({skipped_lines})")
+                    }
+                    SourceHealth::Error { reason } => format!("error({reason})"),
+                };
+                if !matches!(s.health, SourceHealth::Ok) {
+                    crate::logging::warn(&format!("{} health: {health}", s.id.as_str()));
+                }
+                // Also surface whether the live plan-limit % is captured — this
+                // is the "Codex 현재 상태 안 잡힘" signal ("limit=n/a" = missing).
+                let limit = match &s.rate_limit {
+                    RateLimitStatus::Measured { primary_used_percent, .. } => {
+                        format!("{primary_used_percent:.0}%")
+                    }
+                    RateLimitStatus::Cli { .. } => "cli".to_string(),
+                    RateLimitStatus::Estimated { .. } => "est".to_string(),
+                    RateLimitStatus::Unavailable => "n/a".to_string(),
+                };
+                format!(
+                    "{}={}tok/{health}/limit={limit}",
+                    s.id.as_str(),
+                    format_tokens(s.today_tokens.total)
+                )
+            })
+            .collect();
+        crate::logging::info(&format!("refresh: {}", parts.join(", ")));
+        summary
     }
 
     /// Per-device today usage for the combined view. The current device comes
@@ -1170,6 +1209,7 @@ pub fn start(app: AppHandle) {
 
     std::thread::spawn(move || loop {
         let _ = refresh_and_publish(&app);
+        crate::logging::prune(); // roll off logs past the retention window
         std::thread::sleep(Duration::from_secs(REFRESH_INTERVAL_SECS));
     });
 }
@@ -1188,7 +1228,7 @@ fn watch_loop(app: AppHandle) {
     }) {
         Ok(w) => w,
         Err(err) => {
-            eprintln!("meterly: file watcher unavailable ({err}); polling only");
+            crate::logging::warn(&format!("file watcher unavailable ({err}); polling only"));
             return;
         }
     };
