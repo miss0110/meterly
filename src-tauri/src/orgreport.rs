@@ -155,12 +155,13 @@ pub fn merge_rows(buckets: &[&DailyBucket]) -> Vec<UsageRow> {
 
 fn client() -> Option<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .ok()
 }
 
-fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, String> {
+fn post_inner(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, String> {
     let client = client().ok_or("http client init failed")?;
     let mut req = client
         .post(format!("{}{path}", cfg.url))
@@ -176,6 +177,37 @@ fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, St
     } else {
         let body = resp.text().unwrap_or_default();
         Err(format!("HTTP {status} {}", body.chars().take(200).collect::<String>()))
+    }
+}
+
+/// Run the blocking HTTP POST on a dedicated plain thread and log each phase.
+/// reqwest's blocking client panics when entered from an async-runtime thread
+/// (tauri async commands) — the isolation makes callers context-independent,
+/// and `join` converts a panic into an error instead of a hung command.
+fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, String> {
+    crate::logging::info(&format!(
+        "org: POST {}{path} (user {}, body {}B)…",
+        cfg.url,
+        cfg.user_id,
+        body.to_string().len()
+    ));
+    let cfg2 = cfg.clone();
+    let path2 = path.to_string();
+    let body2 = body.clone();
+    let outcome = std::thread::spawn(move || post_inner(&cfg2, &path2, &body2)).join();
+    match outcome {
+        Ok(Ok(status)) => {
+            crate::logging::info(&format!("org: POST {path} → HTTP {status}"));
+            Ok(status)
+        }
+        Ok(Err(e)) => {
+            crate::logging::warn(&format!("org: POST {path} failed: {e}"));
+            Err(e)
+        }
+        Err(_) => {
+            crate::logging::error(&format!("org: POST {path} panicked (internal bug)"));
+            Err("내부 오류 — 로그 폴더의 org 항목을 확인하세요".into())
+        }
     }
 }
 
@@ -234,6 +266,49 @@ mod tests {
         // Serialization must not leak a project field.
         let json = serde_json::to_string(&rows).unwrap();
         assert!(!json.contains("project"), "{json}");
+    }
+
+    #[test]
+    fn register_round_trip_against_local_server() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Read until the JSON body has arrived (ends with '}').
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        req.extend_from_slice(&buf[..n]);
+                        if req.ends_with(b"}") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            s.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}",
+            )
+            .unwrap();
+            String::from_utf8_lossy(&req).to_string()
+        });
+
+        let cfg = OrgConfig {
+            url: format!("http://{addr}"),
+            token: Some("tkn".into()),
+            user_id: "E1".into(),
+            managed: false,
+        };
+        register(&cfg, "test-host").expect("register should succeed");
+        let req = server.join().unwrap();
+        assert!(req.contains("POST /register"), "{req}");
+        assert!(req.contains("Bearer tkn"), "{req}");
+        assert!(req.contains("test-host"), "{req}");
     }
 
     #[test]
