@@ -206,13 +206,15 @@
 
 <style>
   .settings {
-    padding: 1.1rem 1.3rem;
+    padding: 1.1rem 1.3rem 2rem;
     display: flex;
     flex-direction: column;
     gap: 1.1rem;
     height: 100%;
     box-sizing: border-box;
     font-size: 13px;
+    /* Settings grew past the window height — scroll, keeping the bottom pad. */
+    overflow-y: auto;
   }
   h1 {
     margin: 0;
