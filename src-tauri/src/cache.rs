@@ -76,10 +76,13 @@ pub struct CacheV1 {
     /// `None` = auto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date_format: Option<String>,
-    /// Last update version the user was notified about — one notification per
-    /// version, surviving restarts (the popover banner still shows).
+    /// Last update version the user was notified about (with the notice date):
+    /// re-notifies for a new version, or once per new day while the same
+    /// update stays available — so a pending update gets a daily reminder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_notified_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_notice_date: Option<chrono::NaiveDate>,
     /// Limit-gauge display: "used" (사용한 양, default) | "remaining" (남은 양).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_display: Option<String>,
