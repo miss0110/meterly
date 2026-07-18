@@ -5,9 +5,11 @@ pub mod commands;
 pub mod devicesync;
 pub mod logging;
 pub mod model;
+pub mod orgreport;
 pub mod pricing;
 pub mod scheduler;
 pub mod sources;
+pub mod traynum;
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
@@ -58,19 +60,22 @@ fn update_scan(handle: &AppHandle) {
     crate::logging::info(&format!("update scan: v{version} available"));
     let _ = handle.emit("update-available", &version);
 
-    // Notify once per version across restarts.
-    let already = {
+    // Notify for a new version, and once per new day while the same update
+    // stays available (a daily reminder without the user having to check).
+    let today = chrono::Local::now().date_naive();
+    let notify = {
         let state = handle.state::<crate::scheduler::AppState>();
         let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-        if engine.cache.last_notified_update.as_deref() == Some(version.as_str()) {
-            true
-        } else {
+        let due = engine.cache.last_notified_update.as_deref() != Some(version.as_str())
+            || engine.cache.last_update_notice_date != Some(today);
+        if due {
             engine.cache.last_notified_update = Some(version.clone());
+            engine.cache.last_update_notice_date = Some(today);
             engine.save_cache_best_effort();
-            false
         }
+        due
     };
-    if !already {
+    if notify {
         let _ = handle
             .notification()
             .builder()
@@ -289,7 +294,13 @@ pub fn run() {
             commands::check_for_updates,
             commands::open_settings,
             commands::open_log_dir,
-            commands::get_update_status
+            commands::get_update_status,
+            commands::get_org_status,
+            commands::set_org_config,
+            commands::org_register,
+            commands::set_org_sources,
+            commands::org_report_now,
+            commands::org_disable
         ])
         .setup(|app| {
             // Menu bar app: hide the Dock icon.

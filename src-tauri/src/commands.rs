@@ -187,6 +187,128 @@ pub fn get_update_status(state: State<'_, crate::UpdateState>) -> Option<String>
     state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+// ---- Org reporting ----
+
+#[derive(serde::Serialize)]
+pub struct OrgStatus {
+    /// Effective endpoint (managed file wins). `None` = feature off.
+    url: Option<String>,
+    /// True when url/token come from an IT-managed file (read-only in UI).
+    managed: bool,
+    user_id: Option<String>,
+    registered: bool,
+    last_report: Option<chrono::DateTime<chrono::Utc>>,
+    /// Reporting cadence (fixed) — shown in the Settings status panel.
+    interval_secs: i64,
+    /// This device's hostname (sent alongside the identifier).
+    hostname: String,
+    /// Sources included in reports (resolved; default = all known sources).
+    sources: Vec<String>,
+}
+
+#[tauri::command]
+pub fn get_org_status(state: State<'_, AppState>) -> OrgStatus {
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let managed = crate::orgreport::managed_config();
+    let (url, is_managed) = match &managed {
+        Some(m) if m.url.is_some() => (m.url.clone(), true),
+        _ => (engine.cache.org_url.clone(), false),
+    };
+    OrgStatus {
+        url,
+        managed: is_managed,
+        user_id: engine.cache.org_user_id.clone(),
+        registered: engine.cache.org_registered,
+        last_report: engine.cache.last_org_report,
+        interval_secs: crate::orgreport::REPORT_INTERVAL_SECS,
+        hostname: crate::scheduler::hostname(),
+        sources: engine
+            .cache
+            .org_sources
+            .clone()
+            .unwrap_or_else(|| vec!["claude_code".into(), "codex".into()]),
+    }
+}
+
+/// Choose which sources are included in org reports. Unknown ids are dropped;
+/// an empty (or all-unknown) list resets to "all". Takes effect on the next
+/// report — no re-registration needed.
+#[tauri::command]
+pub fn set_org_sources(state: State<'_, AppState>, sources: Vec<String>) {
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let known = ["claude_code", "codex"];
+    let mut cleaned: Vec<String> = sources
+        .into_iter()
+        .filter(|s| known.contains(&s.as_str()))
+        .collect();
+    cleaned.dedup();
+    engine.cache.org_sources = if cleaned.is_empty() { None } else { Some(cleaned) };
+    engine.save_cache_best_effort();
+}
+
+/// Send a usage report immediately (Settings "지금 전송" — connectivity check).
+/// Returns the number of rows sent. `async` — network off the main thread.
+#[tauri::command(async)]
+pub fn org_report_now(app: AppHandle) -> Result<usize, String> {
+    crate::scheduler::send_org_report(&app)
+}
+
+/// Save org settings (url/token ignored while a managed file exists). Any
+/// change resets the registered flag — the identity must re-register.
+#[tauri::command]
+pub fn set_org_config(
+    state: State<'_, AppState>,
+    url: Option<String>,
+    token: Option<String>,
+    user_id: Option<String>,
+) {
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    engine.cache.org_url = clean(url);
+    engine.cache.org_token = clean(token);
+    engine.cache.org_user_id = clean(user_id);
+    engine.cache.org_registered = false;
+    engine.save_cache_best_effort();
+}
+
+/// One-time registration: POST /register with (identifier, hostname). On 2xx
+/// the device starts reporting. `async` — network call off the main thread.
+#[tauri::command(async)]
+pub fn org_register(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let cfg = {
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        crate::orgreport::resolve(&engine.cache)
+            .ok_or("서버 주소와 식별자를 먼저 입력하세요")?
+    };
+    let host = crate::scheduler::hostname();
+    crate::orgreport::register(&cfg, &host).map_err(|e| {
+        crate::logging::warn(&format!("org register failed: {e}"));
+        e
+    })?;
+    crate::logging::info(&format!(
+        "org registered: {} @ {} → {}",
+        cfg.user_id, host, cfg.url
+    ));
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.org_registered = true;
+    engine.save_cache_best_effort();
+    Ok(())
+}
+
+/// Turn org reporting off and clear the stored settings.
+#[tauri::command]
+pub fn org_disable(state: State<'_, AppState>) {
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.org_url = None;
+    engine.cache.org_token = None;
+    engine.cache.org_user_id = None;
+    engine.cache.org_registered = false;
+    engine.cache.org_sources = None;
+    engine.cache.last_org_report = None;
+    engine.save_cache_best_effort();
+}
+
 /// Show the settings window (tray "설정" / Cmd+,).
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {

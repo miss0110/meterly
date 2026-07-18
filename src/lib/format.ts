@@ -62,24 +62,23 @@ const MONTHS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov
  *  locale-formatted times. Parse it to a Date (year inferred; a reset that
  *  already passed rolls to next year) and re-format it the same way. Falls back
  *  to the original string if it doesn't match the expected shape. */
-export function formatResetLabel(
-  label: string | null,
-  fmt: DateFormat = "auto",
-): string | null {
-  if (!label) return label;
-  // New source: ISO timestamp from Claude Code's cachedUsageUtilization.
+/** Parse a reset marker to a Date, or `null` if unrecognized. Handles the ISO
+ *  timestamp from Claude Code's cachedUsageUtilization / Codex, and the legacy
+ *  English `/usage` string ("Jul 19 at 8:59pm (Asia/Seoul)"). */
+export function parseResetDate(label: string | null): Date | null {
+  if (!label) return null;
   // WKWebView rejects fractional seconds longer than 3 digits (the source has
   // microseconds), so truncate the fraction before parsing.
   if (/^\d{4}-\d{2}-\d{2}T/.test(label)) {
     const d = new Date(label.replace(/\.(\d{3})\d+/, ".$1"));
-    if (!Number.isNaN(d.getTime())) return formatResetDate(d, fmt);
+    return Number.isNaN(d.getTime()) ? null : d;
   }
   const m = label.match(
     /([A-Za-z]{3})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i,
   );
-  if (!m) return label;
+  if (!m) return null;
   const monthIdx = MONTHS.indexOf(m[1].toLowerCase());
-  if (monthIdx < 0) return label;
+  if (monthIdx < 0) return null;
   const day = parseInt(m[2], 10);
   let hour = parseInt(m[3], 10) % 12;
   if (/pm/i.test(m[5])) hour += 12;
@@ -90,7 +89,30 @@ export function formatResetLabel(
   if (d.getTime() < now.getTime() - 31 * 86_400_000) {
     d = new Date(now.getFullYear() + 1, monthIdx, day, hour, min);
   }
-  return Number.isNaN(d.getTime()) ? label : formatResetDate(d, fmt);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+export function formatResetLabel(
+  label: string | null,
+  fmt: DateFormat = "auto",
+): string | null {
+  if (!label) return label;
+  const d = parseResetDate(label);
+  return d ? formatResetDate(d, fmt) : label;
+}
+
+/** Remaining time until `d`, e.g. "3시간 12분 후" / "12분 후" / "2일 후".
+ *  `now` is injectable so the caller can drive a live-updating tick. */
+export function formatCountdown(d: Date, now: number = Date.now()): string {
+  const ms = d.getTime() - now;
+  if (ms <= 0) return "곧 리셋";
+  const mins = Math.floor(ms / 60000);
+  const days = Math.floor(mins / 1440);
+  const hours = Math.floor((mins % 1440) / 60);
+  const m = mins % 60;
+  if (days > 0) return `${days}일 ${hours}시간 후`;
+  if (hours > 0) return `${hours}시간 ${m}분 후`;
+  return `${Math.max(1, m)}분 후`;
 }
 
 /** Label a rate-limit window by its length (Codex reports `window_minutes`;

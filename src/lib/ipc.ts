@@ -198,6 +198,33 @@ export const onUsageUpdated = (
 /** Available-update version from the background scan (null = up to date). */
 export const getUpdateStatus = () =>
   invoke<string | null>("get_update_status");
+
+// ---- Org reporting (optional; personal use unaffected) ----
+export interface OrgStatus {
+  url: string | null;
+  /** True when url/token come from an IT-managed file (read-only in UI). */
+  managed: boolean;
+  user_id: string | null;
+  registered: boolean;
+  last_report: string | null;
+  /** Reporting cadence in seconds (fixed). */
+  interval_secs: number;
+  hostname: string;
+  /** Sources included in reports ("claude_code" | "codex"). */
+  sources: string[];
+}
+export const getOrgStatus = () => invoke<OrgStatus>("get_org_status");
+export const setOrgSources = (sources: string[]) =>
+  invoke<void>("set_org_sources", { sources });
+/** Send a usage report immediately; resolves to the number of rows sent. */
+export const orgReportNow = () => invoke<number>("org_report_now");
+export const setOrgConfig = (
+  url: string | null,
+  token: string | null,
+  userId: string | null,
+) => invoke<void>("set_org_config", { url, token, userId });
+export const orgRegister = () => invoke<void>("org_register");
+export const orgDisable = () => invoke<void>("org_disable");
 export const onUpdateAvailable = (
   handler: (version: string) => void,
 ): Promise<UnlistenFn> =>

@@ -238,7 +238,7 @@ fn device_range_usage(
 /// label. Keying by hostname (not a random id) means relaunching or
 /// reinstalling on the same machine reuses its file instead of orphaning the
 /// old one and double-counting.
-fn hostname() -> String {
+pub fn hostname() -> String {
     #[cfg(target_os = "windows")]
     let h = std::env::var("COMPUTERNAME").ok();
     #[cfg(not(target_os = "windows"))]
@@ -1133,7 +1133,35 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
     };
     #[cfg(target_os = "macos")]
     let _ = tray.set_title(title);
-    #[cfg(not(target_os = "macos"))]
+
+    // Windows has no tray title: render the value as the icon bitmap, and put
+    // the full label in the hover tooltip.
+    #[cfg(target_os = "windows")]
+    {
+        match &title {
+            Some(t) => {
+                if let Some((rgba, w, h)) =
+                    crate::traynum::render(crate::traynum::value_token(t), 8)
+                {
+                    let img = tauri::image::Image::new_owned(rgba, w, h);
+                    let _ = tray.set_icon(Some(img));
+                    let _ = tray.set_icon_as_template(false);
+                }
+            }
+            // Icon mode: restore the app glyph.
+            None => {
+                if let Some(icon) = app.default_window_icon() {
+                    let _ = tray.set_icon(Some(icon.clone()));
+                }
+            }
+        }
+        let _ = tray.set_tooltip(Some(match title {
+            Some(t) => format!("meterly — 오늘 {t}"),
+            None => "meterly".to_string(),
+        }));
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let _ = tray.set_tooltip(Some(match title {
         Some(t) => format!("meterly — 오늘 {t}"),
         None => "meterly".to_string(),
@@ -1168,6 +1196,7 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
             .show();
     }
     publish_tray_and_emit(app, &summary);
+    org_report_tick(app);
     Some(summary)
 }
 
@@ -1215,6 +1244,78 @@ fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
     apply_tray_title(app, &snapshot);
 
     let _ = app.emit("usage-updated", summary);
+}
+
+/// Send an org usage report NOW (no throttle check): build the payload under
+/// the engine lock, POST without it, mark last_org_report on success. Returns
+/// the number of rows sent. Also used by the Settings "지금 전송" button.
+pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let (cfg, payload) = {
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::orgreport::resolve(&engine.cache)
+            .ok_or("조직 리포팅이 설정되지 않았습니다")?;
+        if !engine.cache.org_registered {
+            return Err("먼저 등록하세요".into());
+        }
+        // Only the sources the user opted to share (None = all).
+        let allowed = engine.cache.org_sources.clone();
+        let buckets: Vec<&DailyBucket> = engine
+            .all_buckets()
+            .into_iter()
+            .filter(|b| {
+                allowed
+                    .as_ref()
+                    .map_or(true, |a| a.iter().any(|s| s == b.source.as_str()))
+            })
+            .collect();
+        let payload = crate::orgreport::UsagePayload {
+            schema: 1,
+            user_id: cfg.user_id.clone(),
+            hostname: hostname(),
+            app_version: app.package_info().version.to_string(),
+            reported_at: Utc::now(),
+            daily: crate::orgreport::merge_rows(&buckets),
+        };
+        (cfg, payload)
+    };
+
+    match crate::orgreport::report(&cfg, &payload) {
+        Ok(()) => {
+            crate::logging::info(&format!(
+                "org report: {} rows sent to {}",
+                payload.daily.len(),
+                cfg.url
+            ));
+            let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            engine.cache.last_org_report = Some(Utc::now());
+            engine.save_cache_best_effort();
+            Ok(payload.daily.len())
+        }
+        Err(err) => {
+            // last_org_report unchanged → the tick retries next refresh cycle.
+            crate::logging::warn(&format!("org report failed: {err}"));
+            Err(err)
+        }
+    }
+}
+
+/// Org usage reporting tick: when configured + registered and the report
+/// interval elapsed, send a snapshot.
+fn org_report_tick(app: &AppHandle) {
+    let due = {
+        let state = app.state::<AppState>();
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if crate::orgreport::resolve(&engine.cache).is_none() || !engine.cache.org_registered {
+            return;
+        }
+        engine.cache.last_org_report.map_or(true, |at| {
+            (Utc::now() - at).num_seconds() >= crate::orgreport::REPORT_INTERVAL_SECS
+        })
+    };
+    if due {
+        let _ = send_org_report(app); // outcome already logged
+    }
 }
 
 /// Re-emit the current summary + rebuild the tray WITHOUT rescanning — for
