@@ -9,6 +9,7 @@ pub mod orgreport;
 pub mod pricing;
 pub mod scheduler;
 pub mod sources;
+pub mod traynum;
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},

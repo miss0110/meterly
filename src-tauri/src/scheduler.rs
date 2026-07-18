@@ -1133,7 +1133,35 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
     };
     #[cfg(target_os = "macos")]
     let _ = tray.set_title(title);
-    #[cfg(not(target_os = "macos"))]
+
+    // Windows has no tray title: render the value as the icon bitmap, and put
+    // the full label in the hover tooltip.
+    #[cfg(target_os = "windows")]
+    {
+        match &title {
+            Some(t) => {
+                if let Some((rgba, w, h)) =
+                    crate::traynum::render(crate::traynum::value_token(t), 8)
+                {
+                    let img = tauri::image::Image::new_owned(rgba, w, h);
+                    let _ = tray.set_icon(Some(img));
+                    let _ = tray.set_icon_as_template(false);
+                }
+            }
+            // Icon mode: restore the app glyph.
+            None => {
+                if let Some(icon) = app.default_window_icon() {
+                    let _ = tray.set_icon(Some(icon.clone()));
+                }
+            }
+        }
+        let _ = tray.set_tooltip(Some(match title {
+            Some(t) => format!("meterly — 오늘 {t}"),
+            None => "meterly".to_string(),
+        }));
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let _ = tray.set_tooltip(Some(match title {
         Some(t) => format!("meterly — 오늘 {t}"),
         None => "meterly".to_string(),
