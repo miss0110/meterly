@@ -22,6 +22,8 @@
     formatCost,
     formatResetTime,
     formatResetLabel,
+    parseResetDate,
+    formatCountdown,
     windowLabel,
     type DateFormat,
     LABEL_ESTIMATED,
@@ -47,6 +49,8 @@
   let pctMode = $state<string>("used");
   // Available-update version from the background scan (null = up to date).
   let updateVersion = $state<string | null>(null);
+  // Ticks every 30s so reset countdowns stay live while the popover is open.
+  let now = $state<number>(Date.now());
 
   function loadDevices() {
     getDevices()
@@ -75,9 +79,11 @@
       loadDateFmt();
     });
     const unlistenUpdate = onUpdateAvailable((v) => (updateVersion = v));
+    const tick = setInterval(() => (now = Date.now()), 30_000);
     return () => {
       unlisten.then((fn) => fn());
       unlistenUpdate.then((fn) => fn());
+      clearInterval(tick);
     };
   });
 
@@ -196,7 +202,12 @@
     return null;
   }
 
-  type UsageRow = { label: string; percent: number; reset: string | null };
+  type UsageRow = {
+    label: string;
+    percent: number;
+    reset: string | null;
+    resetAt: Date | null;
+  };
   /** Normalize both the real `/usage` (cli) and Codex log (measured) readouts
    *  into one shape so both render as identical session/weekly bar rows. */
   function usageView(
@@ -206,13 +217,14 @@
     if ("cli" in rl) {
       const rows: UsageRow[] = [];
       if (rl.cli.session_percent !== null) {
-        rows.push({ label: "세션", percent: rl.cli.session_percent, reset: null });
+        rows.push({ label: "세션", percent: rl.cli.session_percent, reset: null, resetAt: null });
       }
       for (const w of rl.cli.windows) {
         rows.push({
           label: w.label === "all models" ? "주간" : `주간·${w.label}`,
           percent: w.used_percent,
           reset: formatResetLabel(w.resets_label, dateFmt),
+          resetAt: parseResetDate(w.resets_label),
         });
       }
       return { badge: LABEL_CLI, rows };
@@ -225,6 +237,7 @@
         label: windowLabel(m.window_minutes),
         percent: m.primary_used_percent,
         reset: formatResetTime(m.resets_at, dateFmt),
+        resetAt: parseResetDate(m.resets_at),
       },
     ];
     if (m.secondary_used_percent !== null) {
@@ -232,6 +245,7 @@
         label: "주간",
         percent: m.secondary_used_percent,
         reset: m.secondary_resets_at ? formatResetTime(m.secondary_resets_at, dateFmt) : null,
+        resetAt: parseResetDate(m.secondary_resets_at),
       });
     }
     return { badge: LABEL_MEASURED, rows };
@@ -331,7 +345,9 @@
                 <b class="badge">{LABEL_ESTIMATED}</b>
                 {s.rate_limit.estimated.window_hours}시간 창
                 {formatTokens(s.rate_limit.estimated.window_tokens)} tok ·
-                리셋 {formatResetTime(s.rate_limit.estimated.resets_at, dateFmt)}
+                <span title={`리셋 ${formatResetTime(s.rate_limit.estimated.resets_at, dateFmt)}`}>
+                  리셋 {formatCountdown(new Date(s.rate_limit.estimated.resets_at), now)}
+                </span>
               </span>
             {:else}
               {@const uv = usageView(s.rate_limit)}
@@ -350,7 +366,9 @@
                         {shown.toFixed(0)}%{pctMode === "remaining" ? " 남음" : ""}
                       </span>
                       {#if r.reset}
-                        <span class="muted small reset">리셋 {r.reset}</span>
+                        <span class="muted small reset" title={`리셋 ${r.reset}`}>
+                          리셋 {r.resetAt ? formatCountdown(r.resetAt, now) : r.reset}
+                        </span>
                       {/if}
                     </div>
                   {/each}
