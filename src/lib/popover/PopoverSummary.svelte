@@ -367,7 +367,9 @@
                       </span>
                       {#if r.reset}
                         <span class="muted small reset" title={`리셋 ${r.reset}`}>
-                          리셋 {r.resetAt ? formatCountdown(r.resetAt, now) : r.reset}
+                          리셋 {r.resetAt && r.resetAt.getTime() > now
+                            ? formatCountdown(r.resetAt, now)
+                            : r.reset}
                         </span>
                       {/if}
                     </div>
@@ -543,9 +545,13 @@
     flex: 0 0 auto;
   }
   .source {
-    border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+    /* Distinct panel per provider: subtle fill + stronger border + a colored
+       left accent (Claude orange / Codex blue) so each region reads clearly. */
+    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+    border-left: 3px solid var(--accent, #8a8983);
     border-radius: 10px;
-    padding: 0.6rem 0.7rem;
+    padding: 0.6rem 0.75rem;
+    background: color-mix(in srgb, currentColor 5%, transparent);
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
