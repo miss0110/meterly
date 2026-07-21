@@ -63,6 +63,39 @@ fn handshake_lines() -> String {
     format!("{init}\n{initialized}\n{read}\n")
 }
 
+/// Whether Codex has a usable login: `~/.codex/auth.json` exists and carries a
+/// refresh token (ChatGPT sign-in) or an API key. Read-only file check — the
+/// token itself is never used. Honors `METERLY_CODEX_DIR` like the log source.
+pub fn logged_in() -> bool {
+    let root = std::env::var_os("METERLY_CODEX_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+        .unwrap_or_default();
+    match std::fs::read_to_string(root.join("auth.json")) {
+        Ok(content) => auth_present(&content),
+        Err(_) => false,
+    }
+}
+
+/// True if an `auth.json` body carries a usable credential (a refresh token or
+/// an API key). Split out from [`logged_in`] so it's testable without touching
+/// the real filesystem.
+fn auth_present(json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(json) else {
+        return false;
+    };
+    let has_refresh = v
+        .get("tokens")
+        .and_then(|t| t.get("refresh_token"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    let has_api_key = v
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    has_refresh || has_api_key
+}
+
 /// Run the app-server handshake and read the live plan rate limits. Returns
 /// [`RateLimitStatus::Unavailable`] on any failure (missing binary, timeout,
 /// malformed reply) so the caller can fall back.
@@ -266,6 +299,20 @@ pub fn parse_rate_limits(v: &Value) -> RateLimitStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_present_detects_credentials() {
+        // ChatGPT sign-in: refresh token present.
+        assert!(auth_present(
+            r#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"rt_abc","access_token":"at"}}"#
+        ));
+        // API-key mode.
+        assert!(auth_present(r#"{"OPENAI_API_KEY":"sk-xyz"}"#));
+        // Signed out / empty.
+        assert!(!auth_present(r#"{"tokens":{"refresh_token":""}}"#));
+        assert!(!auth_present(r#"{}"#));
+        assert!(!auth_present("not json"));
+    }
 
     #[test]
     fn parses_live_rate_limits() {

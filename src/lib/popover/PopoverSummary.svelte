@@ -202,6 +202,10 @@
     }
     return null;
   }
+  // The re-login command for a signed-out provider.
+  function loginCmd(id: SourceSummary["id"]): string {
+    return id === "codex" ? "codex login" : "claude 실행 후 /login";
+  }
 
   type UsageRow = {
     label: string;
@@ -342,7 +346,14 @@
           </div>
 
           <div class="limits">
-            {#if s.rate_limit === "unavailable"}
+            {#if s.auth === "logged_out"}
+              <span class="login-needed">
+                <b class="badge warn">로그인 필요</b>
+                <span
+                  >터미널에서 <code>{loginCmd(s.id)}</code> 후 다시 로그인하세요</span
+                >
+              </span>
+            {:else if s.rate_limit === "unavailable"}
               <span class="muted small">한도 정보 없음</span>
             {:else if "estimated" in s.rate_limit}
               <span class="muted small">
@@ -379,6 +390,11 @@
                     </div>
                   {/each}
                 </div>
+              {/if}
+              {#if s.auth === "stale"}
+                <span class="muted small login-hint">
+                  로그인이 만료됐을 수 있어요 · 다시 로그인하면 실제 한도가 표시됩니다
+                </span>
               {/if}
             {/if}
           </div>
@@ -652,6 +668,27 @@
     padding: 0 0.25em;
     font-size: 0.7rem;
     font-weight: 600;
+  }
+  .badge.warn {
+    color: #d98324;
+    border-color: currentColor;
+  }
+  .login-needed {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.8rem;
+    flex-wrap: wrap;
+  }
+  .login-needed code {
+    font-size: 0.75rem;
+    padding: 0.05em 0.35em;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.18);
+  }
+  .login-hint {
+    display: block;
+    margin-top: 0.3em;
   }
   .meter {
     flex: 0 0 56px;

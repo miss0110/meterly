@@ -90,6 +90,8 @@ pub struct SourceSummary {
     pub last7_totals: Vec<u64>,
     /// Logged-in account this source measures (e.g. "email · Team"), if known.
     pub account: Option<String>,
+    /// Whether the source appears signed in — drives the re-login prompt.
+    pub auth: crate::model::AuthState,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -623,8 +625,12 @@ impl Engine {
                     .collect();
                 let rate_limit = match rt.id {
                     SourceId::ClaudeCode => match &self.cache.claude_cli_usage {
-                        // Real /usage readout when we have one; else estimate.
-                        Some((_, rl @ RateLimitStatus::Cli { .. })) => rl.clone(),
+                        // Real /usage readout when it's still current; a cached
+                        // reading whose window already reset is last week's
+                        // stale data, so fall back to the estimate instead.
+                        Some((_, rl)) if crate::sources::claude_usage::cli_current(rl, now) => {
+                            rl.clone()
+                        }
                         _ => aggregate::claude_window_estimate(&self.cache.recent_events, now),
                     },
                     SourceId::Codex => {
@@ -642,6 +648,31 @@ impl Engine {
                     SourceId::ClaudeCode => self.claude_account.clone(),
                     SourceId::Codex => self.codex_account.clone(),
                 };
+                let auth = match rt.id {
+                    // Codex: a definitive file check (no auth.json → signed out).
+                    SourceId::Codex => {
+                        if crate::sources::codex_usage::logged_in() {
+                            crate::model::AuthState::Ok
+                        } else {
+                            crate::model::AuthState::LoggedOut
+                        }
+                    }
+                    // Claude keeps its token in the macOS keychain, which we
+                    // won't read. Infer instead: a cached /usage whose window
+                    // already reset means Claude stopped refreshing it —
+                    // usually a lapsed login. No cached reading → don't nag.
+                    SourceId::ClaudeCode => match &self.cache.claude_cli_usage {
+                        Some((_, rl))
+                            if crate::sources::claude_usage::cli_current(rl, now) =>
+                        {
+                            crate::model::AuthState::Ok
+                        }
+                        Some((_, RateLimitStatus::Cli { .. })) => {
+                            crate::model::AuthState::Stale
+                        }
+                        _ => crate::model::AuthState::Ok,
+                    },
+                };
                 SourceSummary {
                     id: rt.id,
                     display_name: rt.display_name.to_string(),
@@ -652,6 +683,7 @@ impl Engine {
                     rate_limit,
                     last7_totals,
                     account,
+                    auth,
                 }
             })
             .collect();
@@ -1131,8 +1163,36 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
     };
+    // macOS: render the value as a FIXED-size template image instead of a text
+    // title, so the menu-bar item keeps a constant width as the number changes
+    // (a text title reflows on every value change). The full label lives in the
+    // tooltip.
     #[cfg(target_os = "macos")]
-    let _ = tray.set_title(title);
+    {
+        match &title {
+            Some(t) => {
+                if let Some((rgba, w, h)) =
+                    crate::traynum::render_macos_template(crate::traynum::value_token(t))
+                {
+                    let img = tauri::image::Image::new_owned(rgba, w, h);
+                    let _ = tray.set_icon(Some(img));
+                    let _ = tray.set_icon_as_template(true);
+                }
+            }
+            // Icon mode: restore the colored app glyph.
+            None => {
+                if let Some(icon) = app.default_window_icon() {
+                    let _ = tray.set_icon(Some(icon.clone()));
+                }
+                let _ = tray.set_icon_as_template(false);
+            }
+        }
+        let _ = tray.set_title(None::<&str>);
+        let _ = tray.set_tooltip(Some(match &title {
+            Some(t) => format!("meterly — 오늘 {t}"),
+            None => "meterly".to_string(),
+        }));
+    }
 
     // Windows has no tray title: render the value as the icon bitmap, and put
     // the full label in the hover tooltip.
@@ -1600,6 +1660,7 @@ mod tests {
             rate_limit,
             last7_totals: vec![],
             account: None,
+            auth: crate::model::AuthState::Ok,
         }
     }
 

@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::model::{RateLimitStatus, UsageWindow};
@@ -99,13 +100,46 @@ pub fn parse_cached_utilization(c: &Value) -> Option<RateLimitStatus> {
     })
 }
 
+/// Whether a `/usage` reading still describes the CURRENT window.
+///
+/// Claude Code refreshes `cachedUsageUtilization` only occasionally, so a
+/// cached reading whose weekly window has already reset holds the *previous*
+/// week's percentages — showing it as live is misleading (it reads far lower
+/// than reality once a new week starts). We treat a reading as stale when the
+/// latest parseable weekly `resets_at` is in the past. When no reset is
+/// parseable (session-only, or the legacy English reset text) we can't prove
+/// staleness, so we keep the reading rather than break the existing behavior.
+pub fn cli_current(rl: &RateLimitStatus, now: DateTime<Utc>) -> bool {
+    let RateLimitStatus::Cli { windows, .. } = rl else {
+        return false;
+    };
+    let latest = windows
+        .iter()
+        .filter_map(|w| w.resets_label.as_deref())
+        .filter_map(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .max();
+    latest.map_or(true, |reset| reset > now)
+}
+
 /// Real Claude plan usage: the `~/.claude.json` cache first (no subprocess),
 /// then the legacy `claude -p "/usage"` shell-out. Returns
 /// [`RateLimitStatus::Unavailable`] on total failure so the caller can fall
 /// back to the estimate.
 pub fn fetch() -> RateLimitStatus {
     if let Some(rl) = cached_utilization() {
-        return rl;
+        if cli_current(&rl, Utc::now()) {
+            return rl;
+        }
+        // The cache exists but its window already reset — last week's numbers.
+        // Don't present them as live; the caller falls back to the local
+        // estimate. (Current Claude versions no longer print the `/usage`
+        // panel in `-p` mode, so the shell-out below can't refresh it either.)
+        crate::logging::info(
+            "claude usage: cached /usage utilization is stale (window already reset); \
+             falling back to the local estimate",
+        );
+        return RateLimitStatus::Unavailable;
     }
     let Some(bin) = claude_binary() else {
         crate::logging::warn(
@@ -278,6 +312,47 @@ mod tests {
         );
         assert_eq!(windows[1].label, "Fable");
         assert_eq!(windows[1].used_percent, 10.0);
+    }
+
+    fn window(reset: Option<&str>) -> UsageWindow {
+        UsageWindow {
+            label: "all models".into(),
+            used_percent: 8.0,
+            resets_label: reset.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cli_current_flags_expired_windows() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-21T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stale = RateLimitStatus::Cli {
+            session_percent: Some(0.0),
+            windows: vec![window(Some("2026-07-19T11:59:59.914462+00:00"))],
+        };
+        assert!(!cli_current(&stale, now), "reset in the past → stale");
+
+        let fresh = RateLimitStatus::Cli {
+            session_percent: Some(0.0),
+            windows: vec![window(Some("2026-07-26T11:59:59+00:00"))],
+        };
+        assert!(cli_current(&fresh, now), "reset in the future → current");
+
+        // No parseable reset → can't prove staleness, keep the reading.
+        let no_reset = RateLimitStatus::Cli {
+            session_percent: Some(0.0),
+            windows: vec![window(None)],
+        };
+        assert!(cli_current(&no_reset, now));
+        // Legacy English reset text isn't RFC3339 → treated as current.
+        let legacy = RateLimitStatus::Cli {
+            session_percent: Some(0.0),
+            windows: vec![window(Some("Jul 19 at 9pm"))],
+        };
+        assert!(cli_current(&legacy, now));
+
+        assert!(!cli_current(&RateLimitStatus::Unavailable, now));
     }
 
     #[test]
