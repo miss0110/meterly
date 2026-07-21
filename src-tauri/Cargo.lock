@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "meterly"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "base64 0.22.1",
  "chrono",
