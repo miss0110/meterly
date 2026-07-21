@@ -40,15 +40,17 @@ pub fn render(text: &str, scale: usize) -> Option<(Vec<u8>, u32, u32)> {
         return None;
     }
     let gap = scale; // 1 font-pixel gap between glyphs
-    let margin = scale + 1; // room for the outline + breathing space
+    let pad = 2 * scale; // pill padding around the digits
     let content_w = glyphs.len() * GW * scale + (glyphs.len() - 1) * gap;
     let content_h = GH * scale;
-    let canvas = (content_w.max(content_h)) + margin * 2;
+    // Square canvas (Windows tray icons are square) sized to fit the digits +
+    // pill padding, so a wide number keeps its aspect ratio when scaled down.
+    let canvas = content_w.max(content_h) + pad * 2;
     let (w, h) = (canvas, canvas);
     let ox = (w - content_w) / 2;
     let oy = (h - content_h) / 2;
 
-    // Coverage grid (glyph pixels), then dilate by 1 for the outline.
+    // Glyph coverage grid.
     let mut cover = vec![false; w * h];
     let mut x0 = ox;
     for g in &glyphs {
@@ -57,9 +59,7 @@ pub fn render(text: &str, scale: usize) -> Option<(Vec<u8>, u32, u32)> {
                 if row & (1 << (GW - 1 - cx)) != 0 {
                     for sy in 0..scale {
                         for sx in 0..scale {
-                            let px = x0 + cx * scale + sx;
-                            let py = oy + ry * scale + sy;
-                            cover[py * w + px] = true;
+                            cover[(oy + ry * scale + sy) * w + (x0 + cx * scale + sx)] = true;
                         }
                     }
                 }
@@ -68,30 +68,53 @@ pub fn render(text: &str, scale: usize) -> Option<(Vec<u8>, u32, u32)> {
         x0 += GW * scale + gap;
     }
 
+    // Rounded-rect "pill": dark fill + light border so the chip is visible on
+    // BOTH light and dark taskbars (Windows tray icons don't auto-invert). The
+    // number is white on the dark fill.
+    let radius = (w as f32 * 0.26) as i32;
+    let border = scale.max(2) as i32; // thick enough to survive downscaling
     let mut rgba = vec![0u8; w * h * 4];
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) * 4;
-            if cover[y * w + x] {
-                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]); // white fill
-            } else if is_neighbor_covered(&cover, w, h, x, y) {
-                rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 220]); // dark outline
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let i = ((y as usize) * w + x as usize) * 4;
+            let d = rounded_rect_edge_dist(x, y, w as i32, h as i32, radius);
+            if d < 0 {
+                continue; // outside the pill → transparent
+            }
+            if cover[i / 4] {
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]); // white digit
+            } else if d < border {
+                rgba[i..i + 4].copy_from_slice(&[225, 225, 230, 255]); // light border
+            } else {
+                rgba[i..i + 4].copy_from_slice(&[28, 28, 32, 255]); // dark fill
             }
         }
     }
     Some((rgba, w as u32, h as u32))
 }
 
-fn is_neighbor_covered(cover: &[bool], w: usize, h: usize, x: usize, y: usize) -> bool {
-    for dy in -1i32..=1 {
-        for dx in -1i32..=1 {
-            let (nx, ny) = (x as i32 + dx, y as i32 + dy);
-            if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h && cover[ny as usize * w + nx as usize] {
-                return true;
-            }
-        }
-    }
-    false
+/// Signed inset distance (in px) from the nearest edge of a rounded rect that
+/// fills `[0,w)×[0,h)` with corner `radius`. Negative = outside the shape.
+fn rounded_rect_edge_dist(x: i32, y: i32, w: i32, h: i32, radius: i32) -> i32 {
+    // Distance to the straight edges.
+    let edge = x.min(w - 1 - x).min(y).min(h - 1 - y);
+    // Inside a corner region, clamp by distance to the corner's arc.
+    let cx = if x < radius {
+        radius
+    } else if x > w - 1 - radius {
+        w - 1 - radius
+    } else {
+        return edge;
+    };
+    let cy = if y < radius {
+        radius
+    } else if y > h - 1 - radius {
+        h - 1 - radius
+    } else {
+        return edge;
+    };
+    let (dx, dy) = ((x - cx) as f32, (y - cy) as f32);
+    (radius as f32 - (dx * dx + dy * dy).sqrt()) as i32
 }
 
 /// The value token to render — the trailing whitespace-separated part of a
