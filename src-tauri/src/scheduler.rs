@@ -623,8 +623,12 @@ impl Engine {
                     .collect();
                 let rate_limit = match rt.id {
                     SourceId::ClaudeCode => match &self.cache.claude_cli_usage {
-                        // Real /usage readout when we have one; else estimate.
-                        Some((_, rl @ RateLimitStatus::Cli { .. })) => rl.clone(),
+                        // Real /usage readout when it's still current; a cached
+                        // reading whose window already reset is last week's
+                        // stale data, so fall back to the estimate instead.
+                        Some((_, rl)) if crate::sources::claude_usage::cli_current(rl, now) => {
+                            rl.clone()
+                        }
                         _ => aggregate::claude_window_estimate(&self.cache.recent_events, now),
                     },
                     SourceId::Codex => {
