@@ -9,6 +9,7 @@
     checkForUpdates,
     refreshNow,
     openDashboard,
+    openSettings,
     onUsageUpdated,
     type Summary,
     type SourceSummary,
@@ -265,8 +266,11 @@
           {/each}
         </select>
       {/if}
-      <button class="ghost" onclick={doRefresh} disabled={refreshing}>
+      <button class="ghost" onclick={doRefresh} disabled={refreshing} title="새로고침">
         {refreshing ? "…" : "↻"}
+      </button>
+      <button class="ghost" onclick={() => openSettings()} title="설정" aria-label="설정">
+        ⚙
       </button>
     </div>
   </header>
