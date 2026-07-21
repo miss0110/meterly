@@ -63,6 +63,9 @@ export interface SourceSummary {
   last7_totals: number[];
   /** Logged-in account this source measures (e.g. "email · Team"). */
   account: string | null;
+  /** Whether the source appears signed in — drives the re-login prompt.
+   *  "stale" = can't confirm and the plan data expired (usually a lapsed login). */
+  auth: "ok" | "logged_out" | "stale";
 }
 
 export interface Summary {

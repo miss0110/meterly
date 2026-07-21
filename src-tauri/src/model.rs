@@ -114,6 +114,19 @@ pub enum RateLimitStatus {
     Unavailable,
 }
 
+/// Whether a source appears signed in — surfaced so the UI can prompt for
+/// re-login. `Ok` = signed in (or nothing suggests otherwise); `LoggedOut` =
+/// confirmed no credentials (Codex has no `auth.json`); `Stale` = can't
+/// confirm and the plan data has expired — usually a lapsed Claude login,
+/// detected from a cached `/usage` whose window already reset.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    Ok,
+    LoggedOut,
+    Stale,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
