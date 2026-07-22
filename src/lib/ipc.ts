@@ -215,6 +215,8 @@ export interface OrgStatus {
   hostname: string;
   /** Sources included in reports ("claude_code" | "codex"). */
   sources: string[];
+  /** Last actionable server rejection (e.g. unknown identifier), else null. */
+  last_error: string | null;
 }
 export const getOrgStatus = () => invoke<OrgStatus>("get_org_status");
 export const setOrgSources = (sources: string[]) =>

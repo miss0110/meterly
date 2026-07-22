@@ -1349,13 +1349,24 @@ pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
             ));
             let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
             engine.cache.last_org_report = Some(Utc::now());
+            engine.cache.org_last_error = None; // succeeded → clear any prior notice
             engine.save_cache_best_effort();
             Ok(payload.daily.len())
         }
         Err(err) => {
-            // last_org_report unchanged → the tick retries next refresh cycle.
             crate::logging::warn(&format!("org report failed: {err}"));
-            Err(err)
+            let msg = err.message();
+            if err.is_unknown_user() {
+                // The identifier isn't registered — retrying unchanged is
+                // pointless. Drop out of the reporting state and record the
+                // server's message so Settings can tell the user what to fix.
+                let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+                engine.cache.org_registered = false;
+                engine.cache.org_last_error = Some(msg.clone());
+                engine.save_cache_best_effort();
+            }
+            // Other errors: last_org_report unchanged → the tick retries next cycle.
+            Err(msg)
         }
     }
 }

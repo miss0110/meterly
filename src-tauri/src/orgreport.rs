@@ -153,6 +153,35 @@ pub fn merge_rows(buckets: &[&DailyBucket]) -> Vec<UsageRow> {
 
 // ---- HTTP ----
 
+/// A failed org-server call, split so callers can react differently.
+#[derive(Debug, Clone)]
+pub enum OrgError {
+    /// The server rejected the identifier (response body
+    /// `{"error":"unknown_user", "message":"…"}`). The user must fix their
+    /// email/사번; retrying unchanged is pointless. Carries the server message.
+    UnknownUser(String),
+    /// Anything else — network failure, timeout, other HTTP status. Worth a
+    /// retry on the next cycle.
+    Other(String),
+}
+
+impl OrgError {
+    pub fn is_unknown_user(&self) -> bool {
+        matches!(self, OrgError::UnknownUser(_))
+    }
+    pub fn message(&self) -> String {
+        match self {
+            OrgError::UnknownUser(m) | OrgError::Other(m) => m.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for OrgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 fn client() -> Option<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(5))
@@ -161,8 +190,8 @@ fn client() -> Option<reqwest::blocking::Client> {
         .ok()
 }
 
-fn post_inner(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, String> {
-    let client = client().ok_or("http client init failed")?;
+fn post_inner(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, OrgError> {
+    let client = client().ok_or_else(|| OrgError::Other("http client init failed".into()))?;
     let mut req = client
         .post(format!("{}{path}", cfg.url))
         .json(body)
@@ -170,13 +199,37 @@ fn post_inner(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u
     if let Some(t) = &cfg.token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
-    let resp = req.send().map_err(|e| e.to_string())?;
+    let resp = req.send().map_err(|e| OrgError::Other(e.to_string()))?;
     let status = resp.status().as_u16();
-    if resp.status().is_success() {
+    let text = resp.text().unwrap_or_default();
+    // A structured rejection can arrive with any status; classify it first so
+    // the UI can show the server's own message and stop pointless retries.
+    if let Some(err) = classify_body(&text) {
+        return Err(err);
+    }
+    if (200..300).contains(&status) {
         Ok(status)
     } else {
-        let body = resp.text().unwrap_or_default();
-        Err(format!("HTTP {status} {}", body.chars().take(200).collect::<String>()))
+        Err(OrgError::Other(format!(
+            "HTTP {status} {}",
+            text.chars().take(200).collect::<String>()
+        )))
+    }
+}
+
+/// Recognize a JSON error envelope (`{"error":"…","message":"…"}`). Returns the
+/// typed error, or `None` when the body isn't a known rejection.
+fn classify_body(text: &str) -> Option<OrgError> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let kind = v.get("error").and_then(|e| e.as_str())?;
+    let msg = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("등록되지 않은 사용자입니다.")
+        .to_string();
+    match kind {
+        "unknown_user" => Some(OrgError::UnknownUser(msg)),
+        _ => None,
     }
 }
 
@@ -184,7 +237,7 @@ fn post_inner(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u
 /// reqwest's blocking client panics when entered from an async-runtime thread
 /// (tauri async commands) — the isolation makes callers context-independent,
 /// and `join` converts a panic into an error instead of a hung command.
-fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, String> {
+fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, OrgError> {
     crate::logging::info(&format!(
         "org: POST {}{path} (user {}, body {}B)…",
         cfg.url,
@@ -206,7 +259,9 @@ fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, St
         }
         Err(_) => {
             crate::logging::error(&format!("org: POST {path} panicked (internal bug)"));
-            Err("내부 오류 — 로그 폴더의 org 항목을 확인하세요".into())
+            Err(OrgError::Other(
+                "내부 오류 — 로그 폴더의 org 항목을 확인하세요".into(),
+            ))
         }
     }
 }
@@ -214,7 +269,7 @@ fn post(cfg: &OrgConfig, path: &str, body: &serde_json::Value) -> Result<u16, St
 /// One-time registration: records (user_id, hostname) server-side. Any 2xx =
 /// registered. The server dedups/flags identifier reuse — hostname is sent so
 /// the same identifier on two machines is distinguishable.
-pub fn register(cfg: &OrgConfig, hostname: &str) -> Result<(), String> {
+pub fn register(cfg: &OrgConfig, hostname: &str) -> Result<(), OrgError> {
     let body = serde_json::json!({
         "schema": 1,
         "user_id": cfg.user_id,
@@ -226,8 +281,8 @@ pub fn register(cfg: &OrgConfig, hostname: &str) -> Result<(), String> {
 
 /// Send a usage snapshot. Snapshot-style upsert: the whole retention window
 /// every time, so the server heals from missed reports.
-pub fn report(cfg: &OrgConfig, payload: &UsagePayload) -> Result<(), String> {
-    let body = serde_json::to_value(payload).map_err(|e| e.to_string())?;
+pub fn report(cfg: &OrgConfig, payload: &UsagePayload) -> Result<(), OrgError> {
+    let body = serde_json::to_value(payload).map_err(|e| OrgError::Other(e.to_string()))?;
     post(cfg, "/usage", &body).map(|_| ())
 }
 
@@ -235,6 +290,27 @@ pub fn report(cfg: &OrgConfig, payload: &UsagePayload) -> Result<(), String> {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn classify_body_recognizes_unknown_user() {
+        let body = r#"{"error":"unknown_user","message":"등록되지 않은 사용자입니다: a@b.com. 관리자에게 등록된 이메일(사번)을 확인해 정확히 입력하세요."}"#;
+        match classify_body(body) {
+            Some(OrgError::UnknownUser(m)) => {
+                assert!(m.contains("a@b.com"));
+                assert!(m.contains("관리자"));
+            }
+            other => panic!("expected UnknownUser, got {other:?}"),
+        }
+        // A missing message still classifies, with a sane default.
+        assert!(matches!(
+            classify_body(r#"{"error":"unknown_user"}"#),
+            Some(OrgError::UnknownUser(_))
+        ));
+        // Unknown error kinds and non-JSON bodies aren't misclassified.
+        assert!(classify_body(r#"{"error":"rate_limited"}"#).is_none());
+        assert!(classify_body("plain text").is_none());
+        assert!(classify_body("{}").is_none());
+    }
 
     fn bucket(date: (i32, u32, u32), source: SourceId, model: &str, project: &str, input: u64) -> DailyBucket {
         DailyBucket {
