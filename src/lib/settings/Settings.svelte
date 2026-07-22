@@ -16,11 +16,14 @@
     getOrgStatus,
     setOrgConfig,
     setOrgSources,
+    setOrgScope,
     orgRegister,
     orgReportNow,
     orgDisable,
+    getDevices,
     type SettingsData,
     type OrgStatus,
+    type DeviceSummary,
   } from "../ipc";
 
   let s = $state<SettingsData | null>(null);
@@ -47,6 +50,17 @@
   ];
   let orgSources = $state<string[]>(["claude_code", "codex"]);
 
+  // Reporting scope: which devices to include.
+  const ORG_SCOPES = [
+    { id: "this", label: "이 기기만" },
+    { id: "all", label: "동기화된 모든 기기" },
+    { id: "selected", label: "기기 선택" },
+  ] as const;
+  let orgScope = $state<string>("this");
+  let orgScopeDevices = $state<string[]>([]);
+  let devices = $state<DeviceSummary[]>([]);
+  let syncEnabled = $state(false);
+
   function loadOrg() {
     getOrgStatus()
       .then((o) => {
@@ -54,8 +68,38 @@
         orgUrl = o.url ?? "";
         orgId = o.user_id ?? "";
         orgSources = o.sources;
+        orgScope = o.scope;
+        orgScopeDevices = o.scope_devices;
       })
       .catch(() => {});
+    getDevices()
+      .then((d) => {
+        devices = d.devices;
+        syncEnabled = d.sync_enabled;
+      })
+      .catch(() => {});
+  }
+
+  function chooseScope(scope: string) {
+    orgScope = scope;
+    // Default a fresh "selected" to this device so nothing is sent by accident.
+    if (scope === "selected" && orgScopeDevices.length === 0) {
+      const cur = devices.find((d) => d.is_current);
+      if (cur) orgScopeDevices = [cur.device_id];
+    }
+    void setOrgScope(scope, orgScopeDevices);
+  }
+  function toggleScopeDevice(id: string, e: Event) {
+    const on = (e.currentTarget as HTMLInputElement).checked;
+    const next = on
+      ? [...new Set([...orgScopeDevices, id])]
+      : orgScopeDevices.filter((d) => d !== id);
+    if (next.length === 0) {
+      (e.currentTarget as HTMLInputElement).checked = true;
+      return; // keep at least one device selected
+    }
+    orgScopeDevices = next;
+    void setOrgScope("selected", next);
   }
 
   // At least one source must stay selected (an empty report is pointless).
@@ -345,6 +389,47 @@
             </label>
           {/each}
         </div>
+        <div class="src-row">
+          <span class="muted small">전송 범위</span>
+          {#each ORG_SCOPES as sc (sc.id)}
+            <label class="row-toggle small">
+              <input
+                type="radio"
+                name="org-scope"
+                value={sc.id}
+                checked={orgScope === sc.id}
+                onchange={() => chooseScope(sc.id)}
+              />
+              {sc.label}
+            </label>
+          {/each}
+        </div>
+        {#if orgScope !== "this"}
+          <p class="muted small scope-note">
+            {#if !syncEnabled}
+              ⚠ 동기화가 꺼져 있어 이 기기만 전송됩니다. [동기화] 탭에서 공유 폴더를
+              설정하면 다른 기기도 합쳐 보낼 수 있어요.
+            {:else}
+              동기화 폴더에 올라온 각 기기 사용량을 <b>기기별로 구분</b>해 함께
+              전송합니다.
+            {/if}
+          </p>
+        {/if}
+        {#if orgScope === "selected"}
+          <div class="dev-list">
+            {#each devices as d (d.device_id)}
+              <label class="row-toggle small">
+                <input
+                  type="checkbox"
+                  checked={orgScopeDevices.includes(d.device_id)}
+                  onchange={(e) => toggleScopeDevice(d.device_id, e)}
+                />
+                {d.hostname}
+                {#if d.is_current}<span class="here-badge">● 이 기기</span>{/if}
+              </label>
+            {/each}
+          </div>
+        {/if}
         <div class="btn-row">
           <button onclick={registerOrg} disabled={orgBusy || !orgId || (!org?.managed && !orgUrl)}>
             {orgBusy ? "처리 중…" : org?.registered ? "다시 등록" : "등록"}
@@ -397,6 +482,14 @@
                 {ORG_SOURCES.filter((x) => orgSources.includes(x.id))
                   .map((x) => x.label)
                   .join(" · ")}
+              </span>
+            </div>
+            <div class="st-row">
+              <span class="st-key">전송 범위</span>
+              <span>
+                {#if org.scope === "all"}동기화된 모든 기기
+                {:else if org.scope === "selected"}선택한 기기 {org.scope_devices.length}대
+                {:else}이 기기만{/if}
               </span>
             </div>
             <div class="st-row">
@@ -643,6 +736,24 @@
     display: flex;
     align-items: center;
     gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .scope-note {
+    margin: 0.15rem 0 0;
+  }
+  .dev-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin: 0.3rem 0 0 1.2rem;
+    padding: 0.4rem 0.6rem;
+    border-left: 2px solid color-mix(in srgb, CanvasText 15%, transparent);
+  }
+  .here-badge {
+    margin-left: 0.4rem;
+    font-size: 0.72rem;
+    color: #2fa653;
+    font-weight: 600;
   }
   /* Org reporting status panel. */
   .org-status {

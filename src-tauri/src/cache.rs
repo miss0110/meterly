@@ -110,6 +110,13 @@ pub struct CacheV1 {
     /// in Settings so the user can correct their input. Cleared on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_last_error: Option<String>,
+    /// Which devices to include in reports: "this" (this device only, default),
+    /// "all" (every synced device), or "selected" (the ids in org_devices).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_scope: Option<String>,
+    /// Device ids included when org_scope == "selected".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_devices: Option<Vec<String>>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

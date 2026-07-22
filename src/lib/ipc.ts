@@ -217,10 +217,17 @@ export interface OrgStatus {
   sources: string[];
   /** Last actionable server rejection (e.g. unknown identifier), else null. */
   last_error: string | null;
+  /** Which devices to report: "this" | "all" | "selected". */
+  scope: "this" | "all" | "selected";
+  /** Device ids included when scope === "selected". */
+  scope_devices: string[];
 }
 export const getOrgStatus = () => invoke<OrgStatus>("get_org_status");
 export const setOrgSources = (sources: string[]) =>
   invoke<void>("set_org_sources", { sources });
+/** Set reporting scope: "this" | "all" | "selected" (devices apply to "selected"). */
+export const setOrgScope = (scope: string, devices: string[]) =>
+  invoke<void>("set_org_scope", { scope, devices });
 /** Send a usage report immediately; resolves to the number of rows sent. */
 export const orgReportNow = () => invoke<number>("org_report_now");
 export const setOrgConfig = (
