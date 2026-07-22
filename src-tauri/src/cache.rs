@@ -106,6 +106,10 @@ pub struct CacheV1 {
     /// Last successful /usage report (throttles to the report interval).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_org_report: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last actionable org-server rejection (e.g. an unknown identifier) shown
+    /// in Settings so the user can correct their input. Cleared on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_last_error: Option<String>,
 }
 
 /// Cache file path: `~/Library/Application Support/com.meterly.app/` on

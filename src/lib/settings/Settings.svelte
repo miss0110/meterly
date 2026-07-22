@@ -356,6 +356,16 @@
             <button class="ghost" onclick={disableOrg}>해제</button>
           {/if}
         </div>
+        {#if org?.last_error}
+          <div class="org-error" role="alert">
+            <b>⚠ 등록되지 않은 식별자</b>
+            <p>{org.last_error}</p>
+            <p class="hint">
+              위 안내대로 <b>정확한 이메일(사번)</b>을 식별자 칸에 입력하고 다시
+              [등록]을 눌러주세요. 서버에 등록된 값과 한 글자라도 다르면 거부됩니다.
+            </p>
+          </div>
+        {/if}
         {#if orgMsg}
           <p class="small" class:err={orgMsg.includes("실패")}>{orgMsg}</p>
         {/if}
@@ -398,7 +408,16 @@
       {:else if org?.url || org?.managed}
         <section>
           <h2>리포팅 상태</h2>
-          <p class="muted small">● 미등록 — 식별자를 입력하고 [등록]을 눌러야 전송이 시작됩니다.</p>
+          {#if org?.last_error}
+            <p class="muted small">
+              ● 등록 거부됨 — 식별자가 서버에 없습니다. 위 안내를 확인해 정확한
+              이메일(사번)로 다시 등록하세요.
+            </p>
+          {:else}
+            <p class="muted small">
+              ● 미등록 — 식별자를 입력하고 [등록]을 눌러야 전송이 시작됩니다.
+            </p>
+          {/if}
         </section>
       {/if}
     {:else if tab === "about"}
@@ -601,6 +620,24 @@
   }
   .err {
     color: #e0524f;
+  }
+  .org-error {
+    margin-top: 0.6rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid color-mix(in srgb, #e0524f 55%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, #e0524f 12%, transparent);
+    font-size: 0.85rem;
+  }
+  .org-error b {
+    color: #e0524f;
+  }
+  .org-error p {
+    margin: 0.35rem 0 0;
+  }
+  .org-error .hint {
+    color: color-mix(in srgb, CanvasText 65%, transparent);
+    font-size: 0.8rem;
   }
   .src-row {
     display: flex;

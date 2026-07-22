@@ -204,6 +204,9 @@ pub struct OrgStatus {
     hostname: String,
     /// Sources included in reports (resolved; default = all known sources).
     sources: Vec<String>,
+    /// Last actionable server rejection (e.g. unknown identifier), if any —
+    /// shown so the user can correct their input. `None` when all is well.
+    last_error: Option<String>,
 }
 
 #[tauri::command]
@@ -227,6 +230,7 @@ pub fn get_org_status(state: State<'_, AppState>) -> OrgStatus {
             .org_sources
             .clone()
             .unwrap_or_else(|| vec!["claude_code".into(), "codex".into()]),
+        last_error: engine.cache.org_last_error.clone(),
     }
 }
 
@@ -268,6 +272,7 @@ pub fn set_org_config(
     engine.cache.org_token = clean(token);
     engine.cache.org_user_id = clean(user_id);
     engine.cache.org_registered = false;
+    engine.cache.org_last_error = None; // fresh identifier → clear stale notice
     engine.save_cache_best_effort();
 }
 
@@ -282,16 +287,28 @@ pub fn org_register(app: AppHandle) -> Result<(), String> {
             .ok_or("서버 주소와 식별자를 먼저 입력하세요")?
     };
     let host = crate::scheduler::hostname();
-    crate::orgreport::register(&cfg, &host).map_err(|e| {
+    if let Err(e) = crate::orgreport::register(&cfg, &host) {
         crate::logging::warn(&format!("org register failed: {e}"));
-        e
-    })?;
+        // Persist an actionable rejection (e.g. an unknown identifier) so the
+        // status panel keeps showing what to fix, not just the toast.
+        let msg = e.message();
+        let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.org_registered = false;
+        engine.cache.org_last_error = if e.is_unknown_user() {
+            Some(msg.clone())
+        } else {
+            None
+        };
+        engine.save_cache_best_effort();
+        return Err(msg);
+    }
     crate::logging::info(&format!(
         "org registered: {} @ {} → {}",
         cfg.user_id, host, cfg.url
     ));
     let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     engine.cache.org_registered = true;
+    engine.cache.org_last_error = None;
     engine.save_cache_best_effort();
     Ok(())
 }
@@ -306,6 +323,7 @@ pub fn org_disable(state: State<'_, AppState>) {
     engine.cache.org_registered = false;
     engine.cache.org_sources = None;
     engine.cache.last_org_report = None;
+    engine.cache.org_last_error = None;
     engine.save_cache_best_effort();
 }
 
