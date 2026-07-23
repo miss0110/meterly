@@ -346,6 +346,12 @@ impl Engine {
         self.cache.version = cache::CACHE_VERSION;
         self.cache.backfill_start = Some(window_start);
 
+        // Re-read the logged-in account each cycle: the user can switch accounts
+        // while the app runs, and the card label / rate-limit gauge track the
+        // current login (read once at startup would go stale).
+        self.claude_account = crate::accounts::claude_account();
+        self.codex_account = crate::accounts::codex_account();
+
         for rt in &mut self.runtimes {
             // Isolation (AC4): a panicking source must not kill the cycle.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match rt.id {

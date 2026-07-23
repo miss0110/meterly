@@ -309,7 +309,9 @@
             {#if healthError(s)}
               <span class="warn" title={healthError(s)}>{LABEL_READ_ERROR}</span>
             {:else}
-              <span class="tokens"
+              <span
+                class="tokens"
+                title="이 기기의 로컬 세션 토큰 합계 · 계정 무관 (로그에 계정 구분이 없어 여러 계정 사용분이 합쳐집니다). 아래 한도 게이지만 현재 로그인 계정 기준입니다."
                 >{formatTokens(shownTokens(s).total)}<span class="unit"> tok</span></span
               >
             {/if}
@@ -317,7 +319,7 @@
         </div>
         {#if s.account}
           {@const acct = splitAccount(s.account)}
-          <div class="acct" title={s.account}>
+          <div class="acct" title={`${s.account} · 현재 로그인 계정 (한도 게이지 기준)`}>
             <span class="email">{acct.email}</span>
             {#if acct.plan}<span class="plan">{acct.plan}</span>{/if}
           </div>
