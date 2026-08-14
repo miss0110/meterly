@@ -6,11 +6,13 @@
 //! structured data behind the interactive `/usage` panel, refreshed whenever
 //! the user runs claude. Reading it needs no subprocess and no OAuth token.
 //!
-//! Legacy fallback: shell out to `claude -p "/usage"` and parse the printed
-//! panel. CLI ≥ 2.1.x no longer prints that panel in print mode (it emits a
-//! cost summary instead — seen in the field as the "추정" fallback), but old
-//! CLIs still support it and may lack the cache key. On total failure the
-//! caller falls back to the local rolling-window estimate.
+//! Live fallback: shell out to `claude -p "/usage"` and parse the printed
+//! panel (verified against 2.1.208 — it prints the full panel with resets when
+//! signed in; a signed-out CLI prints only a cost summary, which parses as
+//! Unavailable). We shell out whenever the cache can't be trusted: either
+//! window rolled over, or Claude hasn't rewritten it within
+//! [`CACHE_MAX_AGE_SECS`]. On total failure the caller falls back to the local
+//! rolling-window estimate.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -48,12 +50,23 @@ fn claude_binary() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-/// Read Claude Code's own cached `/usage` data from `~/.claude.json`.
-fn cached_utilization() -> Option<RateLimitStatus> {
+/// How long a cached reading may be trusted before we re-read live. Claude
+/// rewrites the cache whenever it runs, so during active use it stays fresh on
+/// its own; this only bounds how stale the panel can get while idle.
+const CACHE_MAX_AGE_SECS: i64 = 600;
+
+/// Read Claude Code's own cached `/usage` data from `~/.claude.json`, plus when
+/// Claude last refreshed it (`fetchedAtMs`) so callers can age it out.
+fn cached_utilization() -> Option<(RateLimitStatus, Option<DateTime<Utc>>)> {
     let home = dirs::home_dir()?;
     let content = std::fs::read_to_string(home.join(".claude.json")).ok()?;
     let v: Value = serde_json::from_str(&content).ok()?;
-    parse_cached_utilization(v.get("cachedUsageUtilization")?)
+    let c = v.get("cachedUsageUtilization")?;
+    let fetched_at = c
+        .get("fetchedAtMs")
+        .and_then(Value::as_i64)
+        .and_then(|ms| DateTime::from_timestamp_millis(ms));
+    Some((parse_cached_utilization(c)?, fetched_at))
 }
 
 /// Map `cachedUsageUtilization.utilization.limits` into [`RateLimitStatus::Cli`].
@@ -129,22 +142,52 @@ pub fn cli_current(rl: &RateLimitStatus, now: DateTime<Utc>) -> bool {
     latest.map_or(true, |reset| reset > now)
 }
 
+/// Whether the 5-hour session window in a reading is still the current one.
+/// That window rolls over several times a day, so a cached reading goes stale
+/// far sooner than its weekly windows do — without this check we keep showing
+/// the previous window's percentage (and a reset time already in the past).
+/// Unparseable/absent resets can't prove staleness, so they count as current.
+pub fn session_current(rl: &RateLimitStatus, now: DateTime<Utc>) -> bool {
+    let RateLimitStatus::Cli {
+        session_resets_at, ..
+    } = rl
+    else {
+        return false;
+    };
+    session_resets_at
+        .as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map_or(true, |reset| reset.with_timezone(&Utc) > now)
+}
+
+/// Whether a reading is usable as-is: both its weekly windows AND its 5-hour
+/// session window still describe the current periods.
+pub fn reading_current(rl: &RateLimitStatus, now: DateTime<Utc>) -> bool {
+    cli_current(rl, now) && session_current(rl, now)
+}
+
 /// Real Claude plan usage: the `~/.claude.json` cache first (no subprocess),
 /// then a `claude -p "/usage"` shell-out. Returns
 /// [`RateLimitStatus::Unavailable`] on total failure so the caller can fall
 /// back to the estimate.
 pub fn fetch() -> RateLimitStatus {
-    if let Some(rl) = cached_utilization() {
-        if cli_current(&rl, Utc::now()) {
+    let now = Utc::now();
+    if let Some((rl, fetched_at)) = cached_utilization() {
+        let age_secs = fetched_at.map(|t| (now - t).num_seconds());
+        let fresh_enough = age_secs.map_or(true, |a| a < CACHE_MAX_AGE_SECS);
+        if reading_current(&rl, now) && fresh_enough {
             return rl; // fast path: current cache, no subprocess needed
         }
-        // Cache exists but its window already reset — last week's numbers.
-        // Don't trust it; fall through to the shell-out for a fresh panel
-        // (only the shell-out reflects the live account after a reset).
-        crate::logging::info(
-            "claude usage: cached /usage utilization is stale (window already reset); \
-             shelling out for a fresh panel",
-        );
+        // Either a window (weekly or the 5-hour session) already rolled over,
+        // or Claude hasn't rewritten the cache in a while. Both mean the
+        // percentages are behind reality — shell out for the live panel.
+        crate::logging::info(&format!(
+            "claude usage: cached /usage utilization not usable \
+             (weekly_current={}, session_current={}, age={}); shelling out for a fresh panel",
+            cli_current(&rl, now),
+            session_current(&rl, now),
+            age_secs.map_or("unknown".into(), |a| format!("{}s", a)),
+        ));
     }
     let Some(bin) = claude_binary() else {
         crate::logging::warn(
@@ -292,6 +335,42 @@ pub fn parse_usage(output: &str) -> RateLimitStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_rollover_makes_a_reading_unusable() {
+        // The real 2026-08-14 case: the weekly window is still current (Aug 16)
+        // but the 5-hour session already reset at 16:50, so the cached 25% is
+        // the previous window's. Weekly-only staleness missed this.
+        let now = DateTime::parse_from_rfc3339("2026-08-14T08:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let rolled = RateLimitStatus::Cli {
+            session_percent: Some(25.0),
+            session_resets_at: Some("2026-08-14T07:50:00+00:00".into()), // past
+            windows: vec![UsageWindow {
+                label: "all models".into(),
+                used_percent: 31.0,
+                resets_label: Some("2026-08-16T08:00:00+00:00".into()), // future
+            }],
+        };
+        assert!(cli_current(&rolled, now), "weekly window is still current");
+        assert!(!session_current(&rolled, now), "session window rolled over");
+        assert!(!reading_current(&rolled, now), "so the reading must not be used");
+
+        // Same reading before the session reset is fully usable.
+        let before = DateTime::parse_from_rfc3339("2026-08-14T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(reading_current(&rolled, before));
+
+        // No session reset recorded (older cache) → can't prove staleness.
+        let unknown = RateLimitStatus::Cli {
+            session_percent: Some(25.0),
+            session_resets_at: None,
+            windows: vec![],
+        };
+        assert!(session_current(&unknown, now));
+    }
 
     #[test]
     fn captures_session_reset_from_both_sources() {
