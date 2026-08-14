@@ -110,14 +110,22 @@ pub struct UsageRow {
     pub cache_creation: u64,
 }
 
+/// One host's complete snapshot within a batch. `user_id` repeats per entry so
+/// the server keys each by `(user_id, hostname)` — the same host reported by
+/// any device produces identical rows, so the upsert is idempotent.
 #[derive(Debug, Clone, Serialize)]
-pub struct UsagePayload {
-    pub schema: u32,
+pub struct ReportEntry {
     pub user_id: String,
     pub hostname: String,
-    pub app_version: String,
-    pub reported_at: chrono::DateTime<chrono::Utc>,
     pub daily: Vec<UsageRow>,
+}
+
+/// Batch body for `POST /usages`: one or more per-host snapshots. A single
+/// device sends `reports` of length 1; "전체"/"기기 선택" send several.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchPayload {
+    pub schema: u32,
+    pub reports: Vec<ReportEntry>,
 }
 
 /// Merge project-keyed buckets into (date, source, model) rows.
@@ -279,11 +287,11 @@ pub fn register(cfg: &OrgConfig, hostname: &str) -> Result<(), OrgError> {
     post(cfg, "/register", &body).map(|_| ())
 }
 
-/// Send a usage snapshot. Snapshot-style upsert: the whole retention window
-/// every time, so the server heals from missed reports.
-pub fn report(cfg: &OrgConfig, payload: &UsagePayload) -> Result<(), OrgError> {
+/// Send a batch of per-host snapshots to `/usages`. Snapshot-style upsert: the
+/// whole retention window every time, so the server heals from missed reports.
+pub fn report_batch(cfg: &OrgConfig, payload: &BatchPayload) -> Result<(), OrgError> {
     let body = serde_json::to_value(payload).map_err(|e| OrgError::Other(e.to_string()))?;
-    post(cfg, "/usage", &body).map(|_| ())
+    post(cfg, "/usages", &body).map(|_| ())
 }
 
 #[cfg(test)]
@@ -341,6 +349,39 @@ mod tests {
         assert_eq!(merged.cache_read, 4);
         // Serialization must not leak a project field.
         let json = serde_json::to_string(&rows).unwrap();
+        assert!(!json.contains("project"), "{json}");
+    }
+
+    #[test]
+    fn batch_payload_matches_server_shape() {
+        let owned = vec![bucket((2026, 7, 20), SourceId::ClaudeCode, "claude-sonnet-5", "meterly", 100)];
+        let refs: Vec<&DailyBucket> = owned.iter().collect();
+        let batch = BatchPayload {
+            schema: 1,
+            reports: vec![
+                ReportEntry {
+                    user_id: "you@sktelecom.com".into(),
+                    hostname: "LAPTOP-A".into(),
+                    daily: merge_rows(&refs),
+                },
+                ReportEntry {
+                    user_id: "you@sktelecom.com".into(),
+                    hostname: "DESKTOP-B".into(),
+                    daily: vec![],
+                },
+            ],
+        };
+        let v: serde_json::Value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(v["schema"], 1);
+        assert_eq!(v["reports"].as_array().unwrap().len(), 2);
+        assert_eq!(v["reports"][0]["user_id"], "you@sktelecom.com");
+        assert_eq!(v["reports"][0]["hostname"], "LAPTOP-A");
+        let row = &v["reports"][0]["daily"][0];
+        assert_eq!(row["date"], "2026-07-20");
+        assert_eq!(row["source"], "claude_code");
+        assert_eq!(row["input"], 100);
+        // No project/prompt/account leakage anywhere in the batch.
+        let json = serde_json::to_string(&batch).unwrap();
         assert!(!json.contains("project"), "{json}");
     }
 

@@ -207,6 +207,11 @@ pub struct OrgStatus {
     /// Last actionable server rejection (e.g. unknown identifier), if any —
     /// shown so the user can correct their input. `None` when all is well.
     last_error: Option<String>,
+    /// Reporting scope: "this" (this device only), "all" (every synced device),
+    /// or "selected" (the device ids in `scope_devices`).
+    scope: String,
+    /// Device ids included when scope == "selected".
+    scope_devices: Vec<String>,
 }
 
 #[tauri::command]
@@ -231,7 +236,28 @@ pub fn get_org_status(state: State<'_, AppState>) -> OrgStatus {
             .clone()
             .unwrap_or_else(|| vec!["claude_code".into(), "codex".into()]),
         last_error: engine.cache.org_last_error.clone(),
+        scope: engine.cache.org_scope.clone().unwrap_or_else(|| "this".into()),
+        scope_devices: engine.cache.org_devices.clone().unwrap_or_default(),
     }
+}
+
+/// Choose which devices are included in reports. `scope` is "this", "all", or
+/// "selected"; `devices` (device ids) applies only to "selected". Takes effect
+/// on the next report — no re-registration needed.
+#[tauri::command]
+pub fn set_org_scope(state: State<'_, AppState>, scope: String, devices: Vec<String>) {
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let scope = match scope.as_str() {
+        "all" | "selected" => scope,
+        _ => "this".to_string(),
+    };
+    engine.cache.org_scope = Some(scope.clone());
+    engine.cache.org_devices = if scope == "selected" && !devices.is_empty() {
+        Some(devices)
+    } else {
+        None
+    };
+    engine.save_cache_best_effort();
 }
 
 /// Choose which sources are included in org reports. Unknown ids are dropped;
@@ -324,6 +350,8 @@ pub fn org_disable(state: State<'_, AppState>) {
     engine.cache.org_sources = None;
     engine.cache.last_org_report = None;
     engine.cache.org_last_error = None;
+    engine.cache.org_scope = None;
+    engine.cache.org_devices = None;
     engine.save_cache_best_effort();
 }
 

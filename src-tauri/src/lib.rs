@@ -299,6 +299,7 @@ pub fn run() {
             commands::set_org_config,
             commands::org_register,
             commands::set_org_sources,
+            commands::set_org_scope,
             commands::org_report_now,
             commands::org_disable
         ])

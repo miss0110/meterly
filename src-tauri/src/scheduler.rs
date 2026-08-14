@@ -346,6 +346,12 @@ impl Engine {
         self.cache.version = cache::CACHE_VERSION;
         self.cache.backfill_start = Some(window_start);
 
+        // Re-read the logged-in account each cycle: the user can switch accounts
+        // while the app runs, and the card label / rate-limit gauge track the
+        // current login (read once at startup would go stale).
+        self.claude_account = crate::accounts::claude_account();
+        self.codex_account = crate::accounts::codex_account();
+
         for rt in &mut self.runtimes {
             // Isolation (AC4): a panicking source must not kill the cycle.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match rt.id {
@@ -1311,7 +1317,7 @@ fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
 /// the number of rows sent. Also used by the Settings "지금 전송" button.
 pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
     let state = app.state::<AppState>();
-    let (cfg, payload) = {
+    let (cfg, batch) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::orgreport::resolve(&engine.cache)
             .ok_or("조직 리포팅이 설정되지 않았습니다")?;
@@ -1320,38 +1326,70 @@ pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
         }
         // Only the sources the user opted to share (None = all).
         let allowed = engine.cache.org_sources.clone();
-        let buckets: Vec<&DailyBucket> = engine
-            .all_buckets()
-            .into_iter()
-            .filter(|b| {
-                allowed
-                    .as_ref()
-                    .map_or(true, |a| a.iter().any(|s| s == b.source.as_str()))
-            })
-            .collect();
-        let payload = crate::orgreport::UsagePayload {
-            schema: 1,
-            user_id: cfg.user_id.clone(),
-            hostname: hostname(),
-            app_version: app.package_info().version.to_string(),
-            reported_at: Utc::now(),
-            daily: crate::orgreport::merge_rows(&buckets),
+        let source_ok = |b: &&DailyBucket| {
+            allowed
+                .as_ref()
+                .map_or(true, |a| a.iter().any(|s| s == b.source.as_str()))
         };
-        (cfg, payload)
+        let this_id = hostname();
+        let scope = engine.cache.org_scope.as_deref().unwrap_or("this");
+        let selected = engine.cache.org_devices.clone().unwrap_or_default();
+        let include_this = match scope {
+            "all" => true,
+            // "selected" with this device chosen, or an empty selection
+            // (fall back to this device so we never send nothing).
+            "selected" => selected.is_empty() || selected.iter().any(|d| d == &this_id),
+            _ => true, // "this"
+        };
+
+        let mut reports: Vec<crate::orgreport::ReportEntry> = Vec::new();
+        if include_this {
+            let buckets: Vec<&DailyBucket> =
+                engine.all_buckets().into_iter().filter(source_ok).collect();
+            reports.push(crate::orgreport::ReportEntry {
+                user_id: cfg.user_id.clone(),
+                hostname: this_id.clone(),
+                daily: crate::orgreport::merge_rows(&buckets),
+            });
+        }
+        // Other synced devices (their published files) when the scope covers them.
+        if scope == "all" || scope == "selected" {
+            if let Some(dir) = engine.cache.sync_dir.clone() {
+                for df in crate::devicesync::read_all(std::path::Path::new(&dir)) {
+                    if df.device_id == this_id {
+                        continue; // this device is already covered by live buckets
+                    }
+                    if scope == "selected" && !selected.iter().any(|d| d == &df.device_id) {
+                        continue;
+                    }
+                    let buckets: Vec<&DailyBucket> =
+                        df.daily.iter().filter(source_ok).collect();
+                    reports.push(crate::orgreport::ReportEntry {
+                        user_id: cfg.user_id.clone(),
+                        hostname: df.hostname.clone(),
+                        daily: crate::orgreport::merge_rows(&buckets),
+                    });
+                }
+            }
+        }
+        let batch = crate::orgreport::BatchPayload { schema: 1, reports };
+        (cfg, batch)
     };
 
-    match crate::orgreport::report(&cfg, &payload) {
+    let rows: usize = batch.reports.iter().map(|r| r.daily.len()).sum();
+    match crate::orgreport::report_batch(&cfg, &batch) {
         Ok(()) => {
             crate::logging::info(&format!(
-                "org report: {} rows sent to {}",
-                payload.daily.len(),
+                "org report: {} host(s), {} rows sent to {}",
+                batch.reports.len(),
+                rows,
                 cfg.url
             ));
             let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
             engine.cache.last_org_report = Some(Utc::now());
             engine.cache.org_last_error = None; // succeeded → clear any prior notice
             engine.save_cache_best_effort();
-            Ok(payload.daily.len())
+            Ok(rows)
         }
         Err(err) => {
             crate::logging::warn(&format!("org report failed: {err}"));
@@ -1681,6 +1719,7 @@ mod tests {
             SourceId::ClaudeCode,
             RateLimitStatus::Cli {
                 session_percent: Some(0.0),
+                session_resets_at: None,
                 windows: vec![
                     UsageWindow {
                         label: "all models".into(),

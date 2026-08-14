@@ -65,6 +65,7 @@ fn cached_utilization() -> Option<RateLimitStatus> {
 pub fn parse_cached_utilization(c: &Value) -> Option<RateLimitStatus> {
     let limits = c.get("utilization")?.get("limits")?.as_array()?;
     let mut session_percent: Option<f64> = None;
+    let mut session_resets_at: Option<String> = None;
     let mut windows: Vec<UsageWindow> = Vec::new();
     for l in limits {
         let Some(pct) = l.get("percent").and_then(Value::as_f64) else {
@@ -73,6 +74,11 @@ pub fn parse_cached_utilization(c: &Value) -> Option<RateLimitStatus> {
         let kind = l.get("kind").and_then(Value::as_str).unwrap_or("");
         if kind == "session" {
             session_percent = Some(pct);
+            // Keep the 5-hour window's reset so the UI can count down to it.
+            session_resets_at = l
+                .get("resets_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             continue;
         }
         let scope_name = l
@@ -96,6 +102,7 @@ pub fn parse_cached_utilization(c: &Value) -> Option<RateLimitStatus> {
     }
     (session_percent.is_some() || !windows.is_empty()).then_some(RateLimitStatus::Cli {
         session_percent,
+        session_resets_at,
         windows,
     })
 }
@@ -123,23 +130,21 @@ pub fn cli_current(rl: &RateLimitStatus, now: DateTime<Utc>) -> bool {
 }
 
 /// Real Claude plan usage: the `~/.claude.json` cache first (no subprocess),
-/// then the legacy `claude -p "/usage"` shell-out. Returns
+/// then a `claude -p "/usage"` shell-out. Returns
 /// [`RateLimitStatus::Unavailable`] on total failure so the caller can fall
 /// back to the estimate.
 pub fn fetch() -> RateLimitStatus {
     if let Some(rl) = cached_utilization() {
         if cli_current(&rl, Utc::now()) {
-            return rl;
+            return rl; // fast path: current cache, no subprocess needed
         }
-        // The cache exists but its window already reset — last week's numbers.
-        // Don't present them as live; the caller falls back to the local
-        // estimate. (Current Claude versions no longer print the `/usage`
-        // panel in `-p` mode, so the shell-out below can't refresh it either.)
+        // Cache exists but its window already reset — last week's numbers.
+        // Don't trust it; fall through to the shell-out for a fresh panel
+        // (only the shell-out reflects the live account after a reset).
         crate::logging::info(
             "claude usage: cached /usage utilization is stale (window already reset); \
-             falling back to the local estimate",
+             shelling out for a fresh panel",
         );
-        return RateLimitStatus::Unavailable;
     }
     let Some(bin) = claude_binary() else {
         crate::logging::warn(
@@ -243,12 +248,15 @@ fn resets_after(s: &str) -> Option<String> {
 /// [`RateLimitStatus::Unavailable`] if neither a session nor any window is found.
 pub fn parse_usage(output: &str) -> RateLimitStatus {
     let mut session_percent: Option<f64> = None;
+    let mut session_resets_at: Option<String> = None;
     let mut windows: Vec<UsageWindow> = Vec::new();
 
     for raw in output.lines() {
         let line = raw.trim();
         if let Some(rest) = line.strip_prefix("Current session:") {
+            // "25% used · resets Aug 14 at 4:50pm (Asia/Seoul)"
             session_percent = percent_before(rest);
+            session_resets_at = resets_after(rest);
         } else if let Some(rest) = line.strip_prefix("Current week ") {
             // rest = "(all models): 6% used · resets Jul 19 at 9pm (Asia/Seoul)"
             let rest = rest.trim_start();
@@ -276,6 +284,7 @@ pub fn parse_usage(output: &str) -> RateLimitStatus {
     }
     RateLimitStatus::Cli {
         session_percent,
+        session_resets_at,
         windows,
     }
 }
@@ -283,6 +292,65 @@ pub fn parse_usage(output: &str) -> RateLimitStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captures_session_reset_from_both_sources() {
+        // Shell-out panel: session carries its own "resets" clause.
+        let out = "Current session: 25% used · resets Aug 14 at 4:50pm (Asia/Seoul)\n\
+                   Current week (all models): 31% used · resets Aug 16 at 5pm (Asia/Seoul)\n";
+        let RateLimitStatus::Cli { session_percent, session_resets_at, .. } = parse_usage(out) else {
+            panic!("expected Cli");
+        };
+        assert_eq!(session_percent, Some(25.0));
+        assert_eq!(
+            session_resets_at.as_deref(),
+            Some("Aug 14 at 4:50pm (Asia/Seoul)")
+        );
+
+        // Cached utilization: the session limit's resets_at is kept, not dropped.
+        let v: Value = serde_json::from_str(
+            r#"{"utilization":{"limits":[
+                {"kind":"session","percent":25,"resets_at":"2026-08-14T07:50:00.423398+00:00","scope":null},
+                {"kind":"weekly_all","percent":31,"resets_at":"2026-08-16T08:00:00.423424+00:00","scope":null}
+            ]}}"#,
+        )
+        .unwrap();
+        let RateLimitStatus::Cli { session_resets_at, .. } =
+            parse_cached_utilization(&v).expect("parses")
+        else {
+            panic!("expected Cli");
+        };
+        assert_eq!(
+            session_resets_at.as_deref(),
+            Some("2026-08-14T07:50:00.423398+00:00")
+        );
+    }
+
+    #[test]
+    fn parses_reset_less_shellout_panel() {
+        // Current `claude -p "/usage"` output: session + weekly %, no inline
+        // "resets" clause and no scoped windows. Must still parse (reset = None).
+        let out = "You are currently using your subscription to power your Claude Code usage\n\
+                   \n\
+                   Current session: 3% used\n\
+                   Current week (all models): 42% used\n\
+                   \n\
+                   What's contributing to your limits usage?\n";
+        let RateLimitStatus::Cli { session_percent, windows, .. } = parse_usage(out) else {
+            panic!("expected Cli");
+        };
+        assert_eq!(session_percent, Some(3.0));
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "all models");
+        assert_eq!(windows[0].used_percent, 42.0);
+        assert_eq!(windows[0].resets_label, None); // no reset in the new format
+        // No reset parseable → we can't prove staleness, so it's treated as current.
+        assert!(cli_current(&RateLimitStatus::Cli {
+            session_percent: Some(3.0),
+            session_resets_at: None,
+            windows,
+        }, Utc::now()));
+    }
 
     #[test]
     fn parses_cached_utilization_limits() {
@@ -298,6 +366,7 @@ mod tests {
         let RateLimitStatus::Cli {
             session_percent,
             windows,
+            ..
         } = parse_cached_utilization(&v).expect("should parse")
         else {
             panic!("expected Cli variant");
@@ -329,12 +398,14 @@ mod tests {
             .with_timezone(&Utc);
         let stale = RateLimitStatus::Cli {
             session_percent: Some(0.0),
+            session_resets_at: None,
             windows: vec![window(Some("2026-07-19T11:59:59.914462+00:00"))],
         };
         assert!(!cli_current(&stale, now), "reset in the past → stale");
 
         let fresh = RateLimitStatus::Cli {
             session_percent: Some(0.0),
+            session_resets_at: None,
             windows: vec![window(Some("2026-07-26T11:59:59+00:00"))],
         };
         assert!(cli_current(&fresh, now), "reset in the future → current");
@@ -342,12 +413,14 @@ mod tests {
         // No parseable reset → can't prove staleness, keep the reading.
         let no_reset = RateLimitStatus::Cli {
             session_percent: Some(0.0),
+            session_resets_at: None,
             windows: vec![window(None)],
         };
         assert!(cli_current(&no_reset, now));
         // Legacy English reset text isn't RFC3339 → treated as current.
         let legacy = RateLimitStatus::Cli {
             session_percent: Some(0.0),
+            session_resets_at: None,
             windows: vec![window(Some("Jul 19 at 9pm"))],
         };
         assert!(cli_current(&legacy, now));
@@ -377,6 +450,7 @@ Last 24h · 1126 requests · 22 sessions\n";
         let RateLimitStatus::Cli {
             session_percent,
             windows,
+            ..
         } = parse_usage(SAMPLE)
         else {
             panic!("expected Cli variant");
@@ -398,6 +472,7 @@ Last 24h · 1126 requests · 22 sessions\n";
         let RateLimitStatus::Cli {
             session_percent,
             windows,
+            ..
         } = parse_usage("Current session: 42.5% used\nCurrent week (all models): 3% used\n")
         else {
             panic!("expected Cli variant");
