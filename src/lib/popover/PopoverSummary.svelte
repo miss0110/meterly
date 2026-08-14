@@ -222,7 +222,14 @@
     if ("cli" in rl) {
       const rows: UsageRow[] = [];
       if (rl.cli.session_percent !== null) {
-        rows.push({ label: "세션", percent: rl.cli.session_percent, reset: null, resetAt: null });
+        // The 5-hour session window carries its own reset — show it counting
+        // down like the weekly rows instead of leaving the row bare.
+        rows.push({
+          label: "세션",
+          percent: rl.cli.session_percent,
+          reset: formatResetLabel(rl.cli.session_resets_at, dateFmt),
+          resetAt: parseResetDate(rl.cli.session_resets_at),
+        });
       }
       for (const w of rl.cli.windows) {
         rows.push({

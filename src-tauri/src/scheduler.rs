@@ -1719,6 +1719,7 @@ mod tests {
             SourceId::ClaudeCode,
             RateLimitStatus::Cli {
                 session_percent: Some(0.0),
+                session_resets_at: None,
                 windows: vec![
                     UsageWindow {
                         label: "all models".into(),

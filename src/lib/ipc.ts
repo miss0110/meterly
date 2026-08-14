@@ -31,6 +31,8 @@ export type RateLimitStatus =
   | {
       cli: {
         session_percent: number | null;
+        /** When the 5-hour session window resets (ISO, or legacy English text). */
+        session_resets_at: string | null;
         windows: UsageWindow[];
       };
     };

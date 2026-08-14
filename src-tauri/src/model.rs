@@ -109,6 +109,10 @@ pub enum RateLimitStatus {
     /// weekly windows.
     Cli {
         session_percent: Option<f64>,
+        /// When the 5-hour session window resets (ISO, or the legacy English
+        /// "Aug 14 at 4:50pm" text). Optional so older caches still deserialize.
+        #[serde(default)]
+        session_resets_at: Option<String>,
         windows: Vec<UsageWindow>,
     },
     Unavailable,
