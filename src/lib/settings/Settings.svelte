@@ -12,6 +12,8 @@
     pickSyncFolder,
     clearSyncFolder,
     checkForUpdates,
+    setPriceSync,
+    refreshPrices,
     openLogDir,
     getOrgStatus,
     setOrgConfig,
@@ -156,6 +158,27 @@
       orgBusy = false;
     }
   }
+  let priceMsg = $state("");
+  let priceBusy = $state(false);
+  function togglePriceSync(e: Event) {
+    const on = (e.currentTarget as HTMLInputElement).checked;
+    if (s) s.price_sync_enabled = on;
+    void setPriceSync(on);
+  }
+  async function refreshPricesNow() {
+    priceBusy = true;
+    priceMsg = "";
+    try {
+      const n = await refreshPrices();
+      priceMsg = `${n}개 모델 가격을 받았습니다`;
+      getSettings().then((v) => (s = v));
+    } catch (e) {
+      priceMsg = `갱신 실패: ${e}`;
+    } finally {
+      priceBusy = false;
+    }
+  }
+
   const fmtTime = (iso: string) => new Date(iso).toLocaleString();
   const intervalLabel = (secs: number) =>
     secs % 3600 === 0 ? `${secs / 3600}시간마다` : `${Math.round(secs / 60)}분마다`;
@@ -328,6 +351,39 @@
           />
           <span class="unit">M tok / 월</span>
         </label>
+      </section>
+
+      <section>
+        <h2>모델 가격</h2>
+        <p class="muted small">
+          "API 환산" 금액은 모델별 공개 API 단가로 계산합니다. 새 모델이 나오면 내장
+          표에 없어서 그 사용량이 금액에서 빠지므로, 공개 가격 목록을 하루 한 번
+          받아 최신으로 유지합니다. 끄면 앱에 내장된 표만 쓰고 네트워크 요청도
+          하지 않습니다.
+        </p>
+        <label class="row-toggle">
+          <input
+            type="checkbox"
+            checked={s.price_sync_enabled}
+            onchange={togglePriceSync}
+          />
+          모델 가격 자동 갱신 (하루 1회)
+        </label>
+        <div class="btn-row">
+          <button onclick={refreshPricesNow} disabled={priceBusy}>
+            {priceBusy ? "갱신 중…" : "지금 갱신"}
+          </button>
+          <span class="muted small">
+            {#if s.price_sync_fetched_at}
+              {s.price_sync_models}개 모델 · 마지막 갱신 {fmtTime(s.price_sync_fetched_at)}
+            {:else}
+              아직 받은 적 없음 — 내장 가격표 사용 중
+            {/if}
+          </span>
+        </div>
+        {#if priceMsg}
+          <p class="small" class:err={priceMsg.includes("실패")}>{priceMsg}</p>
+        {/if}
       </section>
     {:else if tab === "sync"}
       <section>

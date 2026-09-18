@@ -202,8 +202,8 @@ mod tests {
     #[test]
     fn macos_template_is_fixed_size_and_black() {
         let (a, wa, ha) = render_macos_template("293.4M").unwrap();
-        let (b, wb, hb) = render_macos_template("$4.1").unwrap();
-        let (c, wc, hc) = render_macos_template("$1234.5").unwrap();
+        let (_b, wb, hb) = render_macos_template("$4.1").unwrap();
+        let (_c, wc, hc) = render_macos_template("$1234.5").unwrap();
         // Constant footprint regardless of the value's length.
         assert_eq!((wa, ha), (wb, hb));
         assert_eq!((wa, ha), (wc, hc));

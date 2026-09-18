@@ -165,6 +165,12 @@ export interface SettingsData {
   monthly_budget_tokens: number | null;
   date_format: string; // "auto" | "iso" | "us" | "eu"
   percent_display: string; // "used" | "remaining"
+  /** Model-price auto refresh from the public feed (default on). */
+  price_sync_enabled: boolean;
+  /** When prices were last fetched (ISO), or null if never. */
+  price_sync_fetched_at: string | null;
+  /** Active fetched model prices (0 = built-in table only). */
+  price_sync_models: number;
 }
 export const getSettings = () => invoke<SettingsData>("get_settings");
 export const setTrayDisplay = (mode: string) =>
@@ -183,6 +189,10 @@ export const setDateFormat = (format: string) =>
   invoke<void>("set_date_format", { format });
 export const pickSyncFolder = () => invoke<string | null>("pick_sync_folder");
 export const clearSyncFolder = () => invoke<void>("clear_sync_folder");
+export const setPriceSync = (enabled: boolean) =>
+  invoke<void>("set_price_sync", { enabled });
+/** Refresh model prices now; resolves to how many prices were installed. */
+export const refreshPrices = () => invoke<number>("refresh_prices");
 export const checkForUpdates = () => invoke<void>("check_for_updates");
 export const openLogDir = () => invoke<void>("open_log_dir");
 export const openSettings = () => invoke<void>("open_settings");

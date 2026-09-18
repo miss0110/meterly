@@ -12,6 +12,8 @@
 //! Claude Code writes by default) and cache reads separately. OpenAI bills
 //! cached input only, with no separate write charge, so those rows use 0.
 
+use std::sync::{OnceLock, RwLock};
+
 /// USD per 1M tokens for each of the four disjoint token slots.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPrice {
@@ -71,21 +73,63 @@ const PRICE_TABLE: &[(&str, ModelPrice)] = &[
     ("gpt-5", p(1.25, 10.0, 0.125, 0.0)),
 ];
 
-/// Longest-prefix match against `PRICE_TABLE`. Returns the matched prefix
-/// (useful for tests/diagnostics) and its price. Unknown model → `None`.
-pub fn price_for(model: &str) -> Option<(&'static str, &'static ModelPrice)> {
-    PRICE_TABLE
+/// Prices fetched from the maintained public feed (see `pricing_sync`). Empty
+/// until one is loaded; the built-in table above is always the fallback, so
+/// meterly still prices correctly offline and on first run.
+fn overlay() -> &'static RwLock<Vec<(String, ModelPrice)>> {
+    static OVERLAY: OnceLock<RwLock<Vec<(String, ModelPrice)>>> = OnceLock::new();
+    OVERLAY.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Replace the fetched price overlay. Called after loading the on-disk cache
+/// and after each successful refresh.
+pub fn install_overlay(entries: Vec<(String, ModelPrice)>) {
+    if let Ok(mut w) = overlay().write() {
+        *w = entries;
+    }
+}
+
+/// How many fetched models are currently active (0 = built-in table only).
+pub fn overlay_len() -> usize {
+    overlay().read().map(|r| r.len()).unwrap_or(0)
+}
+
+/// Longest-prefix match over the fetched overlay and the built-in table. The
+/// more specific prefix wins; on a tie the fetched price does, since it is the
+/// fresher of the two. Unknown model → `None`.
+fn lookup(model: &str) -> Option<(String, ModelPrice)> {
+    let fetched = overlay().read().ok().and_then(|r| {
+        r.iter()
+            .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(prefix, price)| (prefix.clone(), *price))
+    });
+    let builtin = PRICE_TABLE
         .iter()
         .filter(|(prefix, _)| model.starts_with(prefix))
         .max_by_key(|(prefix, _)| prefix.len())
-        .map(|(prefix, price)| (*prefix, price))
+        .map(|(prefix, price)| (prefix.to_string(), *price));
+    match (fetched, builtin) {
+        (Some(f), Some(b)) => Some(if b.0.len() > f.0.len() { b } else { f }),
+        (f, b) => f.or(b),
+    }
+}
+
+/// Price for a model, or `None` when nothing matches (UI "N/A").
+pub fn price_for(model: &str) -> Option<ModelPrice> {
+    lookup(model).map(|(_, price)| price)
+}
+
+/// Which table entry a model resolved to — diagnostics and tests.
+pub fn matched_prefix(model: &str) -> Option<String> {
+    lookup(model).map(|(prefix, _)| prefix)
 }
 
 /// USD saved by cache reads vs paying the full input rate for the same
 /// tokens: `cache_read * (input rate - cache-read rate)`. `None` for unknown
 /// models; 0-savings models (rates equal) return Some(0.0).
 pub fn cache_savings_usd(model: &str, cache_read_tokens: u64) -> Option<f64> {
-    let (_, price) = price_for(model)?;
+    let price = price_for(model)?;
     let per_tok = (price.input_per_mtok - price.cache_read_per_mtok).max(0.0) / 1_000_000.0;
     Some(cache_read_tokens as f64 * per_tok)
 }
@@ -99,7 +143,7 @@ pub fn cost_usd(
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
 ) -> Option<f64> {
-    let (_, price) = price_for(model)?;
+    let price = price_for(model)?;
     Some(
         (input_tokens as f64 * price.input_per_mtok
             + output_tokens as f64 * price.output_per_mtok
@@ -138,7 +182,7 @@ mod tests {
     #[test]
     fn unknown_model_returns_none() {
         assert_eq!(cost_usd("mistral-large-2", 100, 100, 0, 0), None);
-        assert_eq!(price_for("unknown-model"), None);
+        assert_eq!(matched_prefix("unknown-model"), None);
     }
 
     /// Regression: these are the models actually in the logs as of 2026-09.
@@ -184,21 +228,21 @@ mod tests {
 
     #[test]
     fn prefix_matching_resolves_model_variants() {
-        assert_eq!(price_for("claude-sonnet-5").unwrap().0, "claude-sonnet-5");
-        assert_eq!(price_for("claude-sonnet-4-6").unwrap().0, "claude-sonnet");
-        assert_eq!(price_for("claude-opus-4-8").unwrap().0, "claude-opus-4-8");
-        assert_eq!(price_for("claude-fable-5-1").unwrap().0, "claude-fable-5-1");
-        assert_eq!(price_for("claude-fable-5").unwrap().0, "claude-fable");
+        assert_eq!(matched_prefix("claude-sonnet-5").unwrap(), "claude-sonnet-5");
+        assert_eq!(matched_prefix("claude-sonnet-4-6").unwrap(), "claude-sonnet");
+        assert_eq!(matched_prefix("claude-opus-4-8").unwrap(), "claude-opus-4-8");
+        assert_eq!(matched_prefix("claude-fable-5-1").unwrap(), "claude-fable-5-1");
+        assert_eq!(matched_prefix("claude-fable-5").unwrap(), "claude-fable");
     }
 
     #[test]
     fn longer_prefix_wins() {
         // "gpt-5.5-codex" matches both "gpt-5" and "gpt-5.5" — the longer
         // prefix must win. Same for the 5.6 variants over bare "gpt-5".
-        assert_eq!(price_for("gpt-5.5-codex").unwrap().0, "gpt-5.5");
-        assert_eq!(price_for("gpt-5.1-codex-max").unwrap().0, "gpt-5.1");
-        assert_eq!(price_for("gpt-5.6-sol").unwrap().0, "gpt-5.6");
-        assert_eq!(price_for("gpt-5.6-terra").unwrap().0, "gpt-5.6-terra");
-        assert_eq!(price_for("gpt-6-astra").unwrap().0, "gpt-6-astra");
+        assert_eq!(matched_prefix("gpt-5.5-codex").unwrap(), "gpt-5.5");
+        assert_eq!(matched_prefix("gpt-5.1-codex-max").unwrap(), "gpt-5.1");
+        assert_eq!(matched_prefix("gpt-5.6-sol").unwrap(), "gpt-5.6");
+        assert_eq!(matched_prefix("gpt-5.6-terra").unwrap(), "gpt-5.6-terra");
+        assert_eq!(matched_prefix("gpt-6-astra").unwrap(), "gpt-6-astra");
     }
 }

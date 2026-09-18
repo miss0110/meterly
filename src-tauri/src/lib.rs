@@ -7,6 +7,7 @@ pub mod logging;
 pub mod model;
 pub mod orgreport;
 pub mod pricing;
+pub mod pricing_sync;
 pub mod scheduler;
 pub mod sources;
 pub mod traynum;
@@ -84,6 +85,23 @@ fn update_scan(handle: &AppHandle) {
                 "새 버전 v{version}이(가) 있습니다. 메뉴바 팝오버에서 설치할 수 있어요."
             ))
             .show();
+    }
+}
+
+/// Daily refresh of the fetched model price table. Self-throttled inside
+/// `pricing_sync`, so calling it on the (more frequent) update-scan tick is
+/// free; skipped entirely when the user turned price syncing off.
+fn pricing_scan(handle: &AppHandle) {
+    let enabled = {
+        let state = handle.state::<crate::scheduler::AppState>();
+        let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        engine.cache.price_sync_enabled.unwrap_or(true)
+    };
+    if !enabled {
+        return;
+    }
+    if let Err(err) = crate::pricing_sync::refresh(false) {
+        crate::logging::warn(&format!("pricing refresh failed: {err}"));
     }
 }
 
@@ -285,6 +303,8 @@ pub fn run() {
             commands::set_tray_display,
             commands::set_autostart,
             commands::set_alerts_enabled,
+            commands::set_price_sync,
+            commands::refresh_prices,
             commands::set_alert_thresholds,
             commands::set_percent_display,
             commands::set_monthly_budget,
@@ -381,11 +401,16 @@ pub fn run() {
             // Periodic quiet update scan (launch + every 6h): no dialogs —
             // an available update surfaces as a popover banner + one native
             // notification per version. Install runs when the user clicks.
+            // Fetched prices from a previous run apply immediately; the
+            // scan below only refreshes them once a day.
+            crate::pricing_sync::load_cached();
+
             let scan_handle = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(10));
                 loop {
                     update_scan(&scan_handle);
+                    pricing_scan(&scan_handle);
                     std::thread::sleep(std::time::Duration::from_secs(
                         UPDATE_SCAN_INTERVAL_SECS,
                     ));

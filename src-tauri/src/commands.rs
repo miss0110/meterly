@@ -79,6 +79,12 @@ pub struct SettingsData {
     monthly_budget_tokens: Option<u64>,
     date_format: String,
     percent_display: String,
+    /// Model-price auto refresh (public feed) — on by default.
+    price_sync_enabled: bool,
+    /// When the fetched price table was last refreshed (None = never).
+    price_sync_fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// How many fetched model prices are active (0 = built-in table only).
+    price_sync_models: usize,
 }
 
 /// Current values for the settings window.
@@ -92,6 +98,9 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         sync_dir: engine.cache.sync_dir.clone(),
         alerts_enabled: engine.cache.alerts_enabled.unwrap_or(true),
+        price_sync_enabled: engine.cache.price_sync_enabled.unwrap_or(true),
+        price_sync_fetched_at: crate::pricing_sync::last_fetched(),
+        price_sync_models: crate::pricing::overlay_len(),
         alert_thresholds: engine
             .cache
             .alert_thresholds
@@ -128,6 +137,23 @@ pub fn set_percent_display(app: AppHandle, mode: String) {
 #[tauri::command]
 pub fn set_alerts_enabled(app: AppHandle, enabled: bool) {
     crate::scheduler::set_alerts_enabled(&app, enabled);
+}
+
+/// Turn the model-price feed refresh on/off. Off keeps meterly on its built-in
+/// price table and makes no network call.
+#[tauri::command]
+pub fn set_price_sync(state: State<'_, AppState>, enabled: bool) {
+    let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.cache.price_sync_enabled = Some(enabled);
+    engine.save_cache_best_effort();
+}
+
+/// Refresh model prices now (Settings button), ignoring the daily interval.
+/// Returns how many model prices were installed. `async` — network off the
+/// main thread.
+#[tauri::command(async)]
+pub fn refresh_prices() -> Result<usize, String> {
+    crate::pricing_sync::refresh(true)
 }
 
 /// Set (or clear with 0) the monthly token budget.

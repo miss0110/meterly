@@ -110,6 +110,10 @@ pub struct CacheV1 {
     /// in Settings so the user can correct their input. Cleared on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_last_error: Option<String>,
+    /// Whether to refresh model prices from the public feed (default: on).
+    /// Off keeps meterly on the built-in table and makes no network call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_sync_enabled: Option<bool>,
     /// Which devices to include in reports: "this" (this device only, default),
     /// "all" (every synced device), or "selected" (the ids in org_devices).
     #[serde(default, skip_serializing_if = "Option::is_none")]
