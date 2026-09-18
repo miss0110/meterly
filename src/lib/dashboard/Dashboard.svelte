@@ -9,6 +9,7 @@
     onUsageUpdated,
     type DashboardData,
     type HeatmapCell,
+    type TokenBreakdown,
     type Range,
     type Summary,
   } from "../ipc";
@@ -142,11 +143,65 @@
       dir: pct > 0 ? "up" : "down",
     };
   }
+
+  // ---- Derived insights (from data already in DashboardData / heatmap) ----
+
+  /** Cache hit ratio: share of context tokens served from cache. */
+  function cacheHit(tk: TokenBreakdown): number | null {
+    const ctx = tk.input + tk.cache_read + tk.cache_creation;
+    return ctx > 0 ? (tk.cache_read / ctx) * 100 : null;
+  }
+
+  const AVG_LABEL: Record<Range, string> = {
+    daily30: "일평균",
+    weekly12: "주평균",
+    monthly6: "월평균",
+  };
+
+  /** Range-level KPIs: totals, per-period average, last vs previous period. */
+  function kpis(d: DashboardData) {
+    const periods = [...new Set(d.rows.map((r) => r.period))].sort();
+    const per = periods.map((p) =>
+      d.rows.filter((r) => r.period === p).reduce((n, r) => n + r.tokens.total, 0),
+    );
+    const tokens = per.reduce((a, b) => a + b, 0);
+    let cost: number | null = null;
+    for (const r of d.rows) if (r.cost_usd != null) cost = (cost ?? 0) + r.cost_usd;
+    const avg = periods.length ? tokens / periods.length : 0;
+    const last = per[per.length - 1] ?? 0;
+    const prev = per[per.length - 2] ?? 0;
+    const change = prev > 0 ? ((last - prev) / prev) * 100 : null;
+    return { tokens, cost, avg, periods: periods.length, change };
+  }
+
+  /** Cost per model, ranked, with share of the period's known cost. */
+  function modelCosts(d: DashboardData): { model: string; cost: number; share: number }[] {
+    const by = new Map<string, number>();
+    for (const r of d.rows) {
+      if (r.cost_usd == null || r.cost_usd <= 0) continue;
+      const k = r.model ?? "unknown";
+      by.set(k, (by.get(k) ?? 0) + r.cost_usd);
+    }
+    const total = [...by.values()].reduce((a, b) => a + b, 0);
+    return [...by.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([model, cost]) => ({ model, cost, share: total ? (cost / total) * 100 : 0 }));
+  }
+
+  /** Busiest weekday × hour and the active hour span, for the heatmap caption. */
+  const heatInsight = $derived.by(() => {
+    if (!heatmap.length || heatmapMax <= 1) return null;
+    const peak = heatmap.reduce((a, c) => (c.total > a.total ? c : a));
+    const hours = heatmap.filter((c) => c.total > 0).map((c) => c.hour);
+    const span = hours.length ? `${Math.min(...hours)}–${Math.max(...hours)}시` : null;
+    return { day: WEEKDAYS[peak.weekday], hour: peak.hour, span };
+  });
 </script>
 
 <div class="dashboard">
   <header>
-    <h1>meterly</h1>
+    <h1><span class="orb" aria-hidden="true"></span>meterly <span class="h1-sub">대시보드</span></h1>
     <nav>
       {#if syncEnabled}
         <select
@@ -160,16 +215,23 @@
             <option value={h.id}>{h.hostname}</option>
           {/each}
         </select>
-        <span class="nav-sep"></span>
       {/if}
-      {#each RANGES as r (r.key)}
-        <button class:active={range === r.key} onclick={() => selectRange(r.key)}>
-          {r.label}
-        </button>
-      {/each}
-      <span class="nav-sep"></span>
-      <button title="현재 범위 집계를 CSV로 저장" onclick={() => doExport("csv")}>CSV</button>
-      <button title="현재 범위 집계를 JSON으로 저장" onclick={() => doExport("json")}>JSON</button>
+      <div class="seg" role="tablist" aria-label="기간">
+        {#each RANGES as r (r.key)}
+          <button
+            role="tab"
+            aria-selected={range === r.key}
+            class:active={range === r.key}
+            onclick={() => selectRange(r.key)}
+          >
+            {r.label}
+          </button>
+        {/each}
+      </div>
+      <div class="seg ghost">
+        <button title="현재 범위 집계를 CSV로 저장" onclick={() => doExport("csv")}>CSV</button>
+        <button title="현재 범위 집계를 JSON으로 저장" onclick={() => doExport("json")}>JSON</button>
+      </div>
     </nav>
   </header>
   {#if exportMsg}
@@ -179,30 +241,46 @@
   {#if summary}
     <section class="cards">
       {#each summary.sources as s (s.id)}
+        {@const hit = cacheHit(s.today_tokens)}
         <div class="card" style={`--accent:${t.sources[s.id] ?? "#8a8983"}`}>
           <div class="card-head">
             <span class="card-title">
               <span class="dot"></span>
-              {SOURCE_LABELS[s.id] ?? s.display_name} · 오늘
+              {SOURCE_LABELS[s.id] ?? s.display_name}
+              <span class="card-when">오늘</span>
             </span>
-            <span class="delta {delta(s.last7_totals).dir}">
+            <span class="delta {delta(s.last7_totals).dir}" title="전일 대비">
               {delta(s.last7_totals).text}
             </span>
           </div>
           <div class="card-row">
-            <span class="card-big">{formatTokens(s.today_tokens.total)}</span>
-            <Sparkline values={s.last7_totals} color={t.sources[s.id] ?? "#8a8983"} />
+            <span class="card-big">{formatTokens(s.today_tokens.total)}<span class="unit">tok</span></span>
+            <Sparkline
+              values={s.last7_totals}
+              color={t.sources[s.id] ?? "#8a8983"}
+              width={132}
+              height={30}
+            />
           </div>
-          <div class="card-sub">
-            {LABEL_COST}
-            {s.today_cost_usd === null ? LABEL_COST_NA : formatCost(s.today_cost_usd)}
+          <div class="chips">
+            <span class="chip" title="구독 요금이 아닌 API 정가 환산값">
+              <span class="chip-k">{LABEL_COST}</span>
+              {s.today_cost_usd === null ? LABEL_COST_NA : formatCost(s.today_cost_usd)}
+            </span>
             {#if s.today_cache_saved_usd !== null && s.today_cache_saved_usd >= 0.01}
-              · <span class="saved">캐시로 {formatCost(s.today_cache_saved_usd)} 절약</span>
+              <span class="chip good" title="캐시 읽기를 정가 입력으로 환산했을 때 대비 절약액">
+                캐시 {formatCost(s.today_cache_saved_usd)} 절약
+              </span>
+            {/if}
+            {#if hit !== null}
+              <span class="chip" title="컨텍스트 토큰 중 캐시에서 읽은 비율 — 높을수록 절약이 큽니다">
+                <span class="chip-k">캐시 적중</span>{hit.toFixed(0)}%
+              </span>
             {/if}
             {#if s.rate_limit !== "unavailable" && "estimated" in s.rate_limit}
-              · <b>{LABEL_ESTIMATED}</b> 창 {formatTokens(s.rate_limit.estimated.window_tokens)}
+              <span class="chip"><span class="chip-k">{LABEL_ESTIMATED}</span>{formatTokens(s.rate_limit.estimated.window_tokens)}</span>
             {:else if s.rate_limit !== "unavailable" && "measured" in s.rate_limit}
-              · <b>{LABEL_MEASURED}</b> {s.rate_limit.measured.primary_used_percent.toFixed(0)}%
+              <span class="chip live"><span class="chip-k">{LABEL_MEASURED}</span>{s.rate_limit.measured.primary_used_percent.toFixed(0)}% 사용</span>
             {/if}
           </div>
         </div>
@@ -211,63 +289,85 @@
   {/if}
 
   {#if data}
+    {@const k = kpis(data)}
+    <section class="kpis">
+      <div class="kpi">
+        <span class="kpi-k">기간 합계</span>
+        <span class="kpi-v">{formatTokens(k.tokens)}<span class="unit">tok</span></span>
+        <span class="kpi-s">{RANGES.find((r) => r.key === range)?.label} · {k.periods}구간</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-k">기간 비용</span>
+        <span class="kpi-v">{k.cost === null ? LABEL_COST_NA : formatCost(k.cost)}</span>
+        <span class="kpi-s">{LABEL_COST}, 알려진 모델만</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-k">{AVG_LABEL[range]}</span>
+        <span class="kpi-v">{formatTokens(k.avg)}<span class="unit">tok</span></span>
+        <span class="kpi-s">구간당 평균</span>
+      </div>
+      <div class="kpi">
+        <span class="kpi-k">이전 구간 대비</span>
+        {#if k.change === null}
+          <span class="kpi-v muted">—</span>
+        {:else}
+          <span class="kpi-v {k.change > 5 ? 'up' : k.change < -5 ? 'down' : ''}">
+            {k.change > 0 ? "+" : ""}{k.change.toFixed(0)}%
+          </span>
+        {/if}
+        <span class="kpi-s">마지막 구간 vs 그 이전</span>
+      </div>
+    </section>
+  {/if}
+
+  {#if data}
     {@const mo = data.month}
     {@const usedPct = mo.budget_tokens ? (mo.tokens / mo.budget_tokens) * 100 : 0}
     {@const projPct = mo.budget_tokens ? (mo.projected_tokens / mo.budget_tokens) * 100 : 0}
-    <section class="chart-block">
-      <h2>이번 달 <span class="muted">({mo.days_elapsed}/{mo.days_in_month}일)</span></h2>
+    <section class="panel">
+      <h2>이번 달 <span class="muted">{mo.days_elapsed}/{mo.days_in_month}일</span></h2>
       <div class="month-stats">
         <div class="ms">
-          <span class="ms-label muted">사용</span>
-          <span class="ms-val">{formatTokens(mo.tokens)} tok</span>
-          {#if mo.cost_usd !== null}<span class="ms-sub muted">{formatCost(mo.cost_usd)}</span>{/if}
+          <span class="ms-label">사용</span>
+          <span class="ms-val">{formatTokens(mo.tokens)}<span class="unit">tok</span></span>
+          {#if mo.cost_usd !== null}<span class="ms-sub">{formatCost(mo.cost_usd)}</span>{/if}
         </div>
         <div class="ms">
-          <span class="ms-label muted">월말 예상</span>
-          <span class="ms-val">{formatTokens(mo.projected_tokens)} tok</span>
+          <span class="ms-label">월말 예상</span>
+          <span class="ms-val">{formatTokens(mo.projected_tokens)}<span class="unit">tok</span></span>
           {#if mo.projected_cost_usd !== null}
-            <span class="ms-sub muted">{formatCost(mo.projected_cost_usd)}</span>
+            <span class="ms-sub">{formatCost(mo.projected_cost_usd)}</span>
           {/if}
         </div>
         {#if mo.budget_tokens}
           <div class="ms">
-            <span class="ms-label muted">월 예산</span>
-            <span class="ms-val">{formatTokens(mo.budget_tokens)} tok</span>
+            <span class="ms-label">월 예산</span>
+            <span class="ms-val">{formatTokens(mo.budget_tokens)}<span class="unit">tok</span></span>
+            <span class="ms-sub {projPct > 100 ? 'over' : ''}">
+              {usedPct.toFixed(0)}% 사용 · 월말 {projPct.toFixed(0)}%{projPct > 100 ? " — 초과 예상" : ""}
+            </span>
           </div>
         {/if}
       </div>
       {#if mo.budget_tokens}
-        <div class="budget-bar">
-          <span
-            class="budget-fill"
-            class:over={usedPct > 100}
-            style={`width:${Math.min(100, usedPct)}%`}
-          ></span>
-          <span class="budget-proj" style={`left:${Math.min(100, projPct)}%`}></span>
-        </div>
-        <div class="muted small">
-          예산의 {usedPct.toFixed(0)}% 사용 · 월말 예상 {projPct.toFixed(0)}%{projPct > 100
-            ? " — 예산 초과 예상 ⚠"
-            : ""}
+        <div class="budget-bar" class:over={usedPct > 100}>
+          <span class="budget-fill" style={`width:${Math.min(100, usedPct)}%`}></span>
+          <span class="budget-proj" style={`left:${Math.min(100, projPct)}%`} title="월말 예상"></span>
         </div>
       {/if}
     </section>
   {/if}
 
   {#if scope === "all" && data && data.devices.length}
-    <section class="chart-block">
-      <h2>기기별 <span class="muted">(기간 합계)</span></h2>
-      <div class="devices">
+    <section class="panel">
+      <h2>기기별 <span class="muted">기간 합계</span></h2>
+      <div class="rows">
         {#each data.devices as d (d.hostname)}
-          <div class="dev-row">
-            <span class="dev-host">{d.hostname}{d.is_current ? " · 이 기기" : ""}</span>
-            <span class="dev-tok">{formatTokens(d.tokens.total)} tok</span>
-            <span class="dev-cost muted">
-              {d.cost_usd === null ? LABEL_COST_NA : formatCost(d.cost_usd)}
-            </span>
-            <span class="dev-when muted">
-              {d.is_current ? "실시간" : freshness(d.updated_at)}
-            </span>
+          <div class="row4">
+            <span class="r-name">{d.hostname}{#if d.is_current}<span class="here">이 기기</span>{/if}</span>
+            <span class="r-num">{formatTokens(d.tokens.total)}<span class="unit">tok</span></span>
+            <span class="r-sub">{d.cost_usd === null ? LABEL_COST_NA : formatCost(d.cost_usd)}</span>
+            <span class="r-sub">{d.is_current ? "실시간" : freshness(d.updated_at)}</span>
           </div>
         {/each}
       </div>
@@ -276,36 +376,36 @@
 
   {#if data && data.projects.length}
     {@const projMax = data.projects[0]?.tokens.total || 1}
-    <section class="chart-block">
-      <h2>프로젝트별 <span class="muted">(기간 합계)</span></h2>
-      <div class="proj-legend muted">
-        <span><span class="lg-dot" style={`background:${t.sources.claude_code}`}></span>Claude Code</span>
-        <span><span class="lg-dot" style={`background:${t.sources.codex}`}></span>Codex</span>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>프로젝트별 <span class="muted">기간 합계</span></h2>
+        <div class="legend">
+          <span><i style={`background:${t.sources.claude_code}`}></i>Claude Code</span>
+          <span><i style={`background:${t.sources.codex}`}></i>Codex</span>
+        </div>
       </div>
-      <div class="projects">
+      <div class="rows">
         {#each data.projects.slice(0, 15) as p (p.project)}
           <div class="proj-row">
             <span
-              class="proj-name"
+              class="r-name"
               title={p.project === "(미분류)"
                 ? "프로젝트(cwd)가 기록되지 않은 사용량 — 프로젝트 추적 이전의 과거 데이터가 대부분이며, 기간이 지나면 줄어듭니다"
                 : p.project}>{p.project}</span>
-            <span class="proj-bar">
+            <span class="bar">
               <span
-                class="proj-fill"
+                class="bar-fill"
                 style={`width:${(p.claude_tokens / projMax) * 100}%;background:${t.sources.claude_code}`}
                 title="Claude Code {formatTokens(p.claude_tokens)} tok"
               ></span>
               <span
-                class="proj-fill"
+                class="bar-fill"
                 style={`width:${(p.codex_tokens / projMax) * 100}%;background:${t.sources.codex}`}
                 title="Codex {formatTokens(p.codex_tokens)} tok"
               ></span>
             </span>
-            <span class="proj-tok">{formatTokens(p.tokens.total)} tok</span>
-            <span class="proj-cost muted">
-              {p.cost_usd === null ? LABEL_COST_NA : formatCost(p.cost_usd)}
-            </span>
+            <span class="r-num">{formatTokens(p.tokens.total)}<span class="unit">tok</span></span>
+            <span class="r-sub">{p.cost_usd === null ? LABEL_COST_NA : formatCost(p.cost_usd)}</span>
           </div>
         {/each}
         {#if data.projects.length > 15}
@@ -316,46 +416,98 @@
   {/if}
 
   <section class="grid-2">
-    <div class="chart-block">
-      <h2>도구별 추이 <span class="muted">(토큰)</span></h2>
+    <div class="panel">
+      <h2>도구별 추이 <span class="muted">토큰</span></h2>
       <div class="chart-wrap"><canvas bind:this={trendCanvas}></canvas></div>
     </div>
-    <div class="chart-block">
-      <h2>토큰 구성 <span class="muted">(입력·출력·캐시)</span></h2>
+    <div class="panel">
+      <h2>토큰 구성 <span class="muted">입력·출력·캐시</span></h2>
       <div class="chart-wrap"><canvas bind:this={compositionCanvas}></canvas></div>
     </div>
   </section>
 
   <section class="grid-2">
-    <div class="chart-block">
-      <h2>비용 추이 <span class="muted">({LABEL_COST}, 알려진 모델만)</span></h2>
+    <div class="panel">
+      <h2>비용 추이 <span class="muted">{LABEL_COST}, 알려진 모델만</span></h2>
       <div class="chart-wrap short"><canvas bind:this={costCanvas}></canvas></div>
     </div>
-    <div class="chart-block">
-      <h2>모델별 비교 <span class="muted">(기간 합계)</span></h2>
+    <div class="panel">
+      <h2>모델별 비교 <span class="muted">기간 합계</span></h2>
       <div class="chart-wrap short"><canvas bind:this={modelCanvas}></canvas></div>
     </div>
   </section>
 
-  <section class="chart-block">
-    <h2>사용 패턴 히트맵 <span class="muted">(요일×시간, 이 기기)</span></h2>
-    <div class="heatmap">
-      <div class="hm-corner"></div>
-      {#each Array(24) as _, h}
-        <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
-      {/each}
-      {#each WEEKDAYS as day, wd}
-        <div class="hm-day">{day}</div>
-        {#each Array(24) as _, h}
-          <div
-            class="hm-cell"
-            style={`background:${heatColor(cellAt(wd, h))}`}
-            title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
-          ></div>
-        {/each}
-      {/each}
-    </div>
-  </section>
+  {#if data}
+    {@const mc = modelCosts(data)}
+    {#if mc.length}
+      <section class="grid-2">
+        <div class="panel">
+          <h2>모델별 비용 비중 <span class="muted">기간 합계</span></h2>
+          <div class="rows">
+            {#each mc as m (m.model)}
+              <div class="mc-row">
+                <span class="r-name mono">{m.model}</span>
+                <span class="bar"><span class="bar-fill accent" style={`width:${m.share}%`}></span></span>
+                <span class="r-num">{formatCost(m.cost)}</span>
+                <span class="r-sub">{m.share.toFixed(0)}%</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+        <div class="panel">
+          <h2>사용 패턴 <span class="muted">요일×시간, 이 기기</span></h2>
+          <div class="heatmap">
+            <div class="hm-corner"></div>
+            {#each Array(24) as _, h}
+              <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
+            {/each}
+            {#each WEEKDAYS as day, wd}
+              <div class="hm-day">{day}</div>
+              {#each Array(24) as _, h}
+                <div
+                  class="hm-cell"
+                  style={`background:${heatColor(cellAt(wd, h))}`}
+                  title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
+                ></div>
+              {/each}
+            {/each}
+          </div>
+          {#if heatInsight}
+            <p class="insight">
+              가장 활발한 시간 <b>{heatInsight.day} {heatInsight.hour}시</b>
+              {#if heatInsight.span}· 활동 시간대 <b>{heatInsight.span}</b>{/if}
+            </p>
+          {/if}
+        </div>
+      </section>
+    {:else}
+      <section class="panel">
+        <h2>사용 패턴 <span class="muted">요일×시간, 이 기기</span></h2>
+        <div class="heatmap">
+          <div class="hm-corner"></div>
+          {#each Array(24) as _, h}
+            <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
+          {/each}
+          {#each WEEKDAYS as day, wd}
+            <div class="hm-day">{day}</div>
+            {#each Array(24) as _, h}
+              <div
+                class="hm-cell"
+                style={`background:${heatColor(cellAt(wd, h))}`}
+                title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
+              ></div>
+            {/each}
+          {/each}
+        </div>
+        {#if heatInsight}
+          <p class="insight">
+            가장 활발한 시간 <b>{heatInsight.day} {heatInsight.hour}시</b>
+            {#if heatInsight.span}· 활동 시간대 <b>{heatInsight.span}</b>{/if}
+          </p>
+        {/if}
+      </section>
+    {/if}
+  {/if}
 
   {#if data}
     <footer class="muted">{data.timezone_note}</footer>
@@ -363,74 +515,181 @@
 </div>
 
 <style>
+  /* ---------- Shell ---------- */
   .dashboard {
-    padding: 1.25rem 1.5rem;
+    padding: 1.15rem 1.4rem 1.25rem;
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
+    gap: 0.9rem;
     box-sizing: border-box;
     height: 100%;
     overflow-y: auto;
+    background:
+      radial-gradient(
+        70% 45% at 50% -10%,
+        color-mix(in srgb, #4f8ef7 12%, transparent),
+        transparent 65%
+      );
   }
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
   }
   h1 {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
     font-size: 1.1rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
     margin: 0;
   }
-  h2 {
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    margin: 0 0 0.75rem;
-    color: color-mix(in srgb, CanvasText 62%, transparent);
+  .h1-sub {
+    font-weight: 500;
+    opacity: 0.45;
+    font-size: 0.9rem;
+  }
+  .orb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #eb6834, #4f8ef7);
+    box-shadow: 0 0 12px color-mix(in srgb, #4f8ef7 55%, transparent);
   }
   nav {
     display: flex;
-    gap: 0.25rem;
+    align-items: center;
+    gap: 0.6rem;
   }
-  nav button {
+  /* Segmented control: one pill housing the range tabs. */
+  .seg {
+    display: inline-flex;
+    padding: 3px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 7%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 9%, transparent);
+  }
+  .seg button {
     font: inherit;
-    font-size: 0.8rem;
-    padding: 0.3rem 0.6rem;
-    border-radius: 6px;
-    border: 1px solid rgba(128, 128, 128, 0.35);
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.28rem 0.75rem;
+    border-radius: 999px;
+    border: none;
     background: transparent;
     color: inherit;
+    opacity: 0.7;
     cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease;
   }
-  nav button.active {
-    background: #4f8ef7;
-    border-color: #4f8ef7;
-    color: white;
+  .seg button:hover {
+    opacity: 1;
+  }
+  .seg button.active {
+    opacity: 1;
+    color: #fff;
+    background: linear-gradient(135deg, #4f8ef7, #6a5cf5);
+    box-shadow: 0 6px 14px -8px rgba(79, 142, 247, 0.8);
+  }
+  .seg.ghost button {
+    font-weight: 500;
+    padding: 0.28rem 0.6rem;
   }
   .scope-select {
     font: inherit;
-    font-size: 0.8rem;
-    padding: 0.3rem 0.5rem;
-    border-radius: 6px;
-    border: 1px solid rgba(128, 128, 128, 0.35);
-    background: rgba(128, 128, 128, 0.12);
+    font-size: 0.78rem;
+    padding: 0.32rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    background: color-mix(in srgb, currentColor 7%, transparent);
     color: inherit;
     cursor: pointer;
     max-width: 180px;
   }
+  .toast {
+    font-size: 0.75rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, #4f8ef7 14%, transparent);
+    border: 1px solid color-mix(in srgb, #4f8ef7 35%, transparent);
+    align-self: flex-start;
+  }
+
+  /* ---------- Glass panels (shared by cards and chart blocks) ---------- */
+  .panel,
+  .card,
+  .kpi {
+    min-width: 0;
+    border-radius: 16px;
+    background: color-mix(in srgb, currentColor 4%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 9%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent);
+  }
+  .panel {
+    padding: 0.95rem 1.1rem 1rem;
+  }
+  .panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+  }
+  h2 {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin: 0 0 0.8rem;
+    opacity: 0.55;
+  }
+  h2 .muted {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+    margin-left: 0.4em;
+  }
+  .muted {
+    opacity: 0.55;
+    font-size: 0.74rem;
+    font-weight: 400;
+  }
+  .small {
+    font-size: 0.72rem;
+  }
+  .unit {
+    font-size: 0.62em;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    opacity: 0.5;
+    margin-left: 0.3em;
+  }
+
+  /* ---------- Today cards ---------- */
   .cards {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 0.75rem;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 0.9rem;
   }
   .card {
-    border: 1px solid rgba(128, 128, 128, 0.25);
-    border-left: 3px solid var(--accent);
-    border-radius: 10px;
-    padding: 0.7rem 0.75rem;
+    position: relative;
+    padding: 0.9rem 1.05rem 0.95rem;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.6rem;
+    background:
+      radial-gradient(
+        90% 60% at 0% 0%,
+        color-mix(in srgb, var(--accent) 16%, transparent),
+        transparent 70%
+      ),
+      color-mix(in srgb, currentColor 4.5%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 26%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent),
+      0 12px 32px -20px color-mix(in srgb, var(--accent) 50%, transparent);
   }
   .card-head {
     display: flex;
@@ -438,259 +697,354 @@
     align-items: center;
   }
   .card-title {
-    font-size: 0.78rem;
-    opacity: 0.75;
+    font-size: 0.98rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
     display: inline-flex;
     align-items: center;
-    gap: 0.35em;
+    gap: 0.5em;
+  }
+  .card-when {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.45;
+    margin-left: 0.2em;
   }
   .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 3px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
     background: var(--accent);
     display: inline-block;
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent),
+      0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
   }
   .delta {
     font-size: 0.7rem;
-    font-weight: 600;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
   }
   .delta.up {
-    color: #e34948;
+    color: #e0524f;
+    background: color-mix(in srgb, #e0524f 14%, transparent);
   }
   .delta.down {
-    color: #008300;
+    color: #22a559;
+    background: color-mix(in srgb, #22a559 14%, transparent);
   }
   .delta.flat {
-    opacity: 0.55;
+    opacity: 0.6;
   }
   .card-row {
     display: flex;
     justify-content: space-between;
     align-items: flex-end;
-    gap: 0.5rem;
+    gap: 0.75rem;
   }
   .card-big {
-    font-size: 1.55rem;
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.72rem;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 7%, transparent);
+    white-space: nowrap;
+  }
+  .chip-k {
+    font-weight: 500;
+    opacity: 0.6;
+  }
+  .chip.good {
+    color: #22a559;
+    background: color-mix(in srgb, #22a559 14%, transparent);
+  }
+  .chip.live {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .chip.live .chip-k {
+    color: inherit;
+    opacity: 0.75;
+  }
+
+  /* ---------- Range KPIs ---------- */
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.75rem;
+  }
+  .kpi {
+    padding: 0.75rem 0.95rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .kpi-k {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    opacity: 0.5;
+  }
+  .kpi-v {
+    font-size: 1.3rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
   }
-  .card-sub {
-    font-size: 0.75rem;
-    opacity: 0.75;
+  .kpi-v.up { color: #e0524f; }
+  .kpi-v.down { color: #22a559; }
+  .kpi-v.muted { font-size: 1.3rem; opacity: 0.35; }
+  .kpi-s {
+    font-size: 0.7rem;
+    opacity: 0.5;
   }
-  .saved {
-    color: #008300;
+
+  /* ---------- Month ---------- */
+  .month-stats {
+    display: flex;
+    gap: 2.25rem;
+    flex-wrap: wrap;
+  }
+  .ms {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ms-label {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    opacity: 0.5;
+  }
+  .ms-val {
+    font-variant-numeric: tabular-nums;
+    font-weight: 800;
+    font-size: 1.25rem;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+  .ms-sub {
+    font-size: 0.74rem;
+    opacity: 0.6;
+  }
+  .ms-sub.over {
+    color: #e0524f;
+    opacity: 1;
     font-weight: 600;
   }
+  .budget-bar {
+    position: relative;
+    height: 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    margin-top: 0.85rem;
+  }
+  .budget-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #4f8ef7, #7aa9ff);
+    box-shadow: 0 0 12px color-mix(in srgb, #4f8ef7 55%, transparent);
+    transition: width 0.4s ease;
+  }
+  .budget-bar.over .budget-fill {
+    background: linear-gradient(90deg, #e0524f, #ff8a7a);
+    box-shadow: 0 0 12px color-mix(in srgb, #e0524f 60%, transparent);
+  }
+  /* Month-end projection: a diamond tick riding on the bar. */
+  .budget-proj {
+    position: absolute;
+    top: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    background: CanvasText;
+    transform: translate(-50%, -50%) rotate(45deg);
+    box-shadow: 0 0 0 2px Canvas;
+  }
+
+  /* ---------- Row lists (devices / projects / model cost) ---------- */
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .row4,
+  .proj-row,
+  .mc-row {
+    display: grid;
+    gap: 0.9rem;
+    align-items: center;
+    padding: 0.42rem 0.55rem;
+    border-radius: 10px;
+    font-size: 0.86rem;
+  }
+  .row4 { grid-template-columns: 1fr auto auto auto; }
+  .proj-row { grid-template-columns: minmax(7rem, 1.3fr) 3fr auto auto; }
+  .mc-row { grid-template-columns: minmax(9rem, 1.4fr) 3fr auto 3.2rem; }
+  .row4:hover,
+  .proj-row:hover,
+  .mc-row:hover {
+    background: color-mix(in srgb, currentColor 5%, transparent);
+  }
+  .r-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    min-width: 0;
+  }
+  .r-name.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    font-weight: 500;
+  }
+  .here {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #22a559;
+    background: color-mix(in srgb, #22a559 14%, transparent);
+    padding: 1px 7px;
+    border-radius: 999px;
+  }
+  .r-num {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .r-sub {
+    font-size: 0.74rem;
+    opacity: 0.55;
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar {
+    display: flex;
+    gap: 2px;
+    height: 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.4s ease;
+  }
+  .bar-fill.accent {
+    background: linear-gradient(90deg, #4f8ef7, #7aa9ff);
+    box-shadow: 0 0 8px color-mix(in srgb, #4f8ef7 45%, transparent);
+  }
+  .legend {
+    display: flex;
+    gap: 0.9rem;
+    font-size: 0.7rem;
+    opacity: 0.7;
+  }
+  .legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+  }
+  .legend i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  /* ---------- Charts ---------- */
   .grid-2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 1rem;
+    gap: 0.9rem;
   }
   @media (max-width: 820px) {
     .grid-2 {
       grid-template-columns: 1fr;
     }
   }
-  .chart-block {
-    min-width: 0;
-    border: 1px solid rgba(128, 128, 128, 0.22);
-    border-radius: 12px;
-    padding: 1rem 1.15rem;
-    background: color-mix(in srgb, CanvasText 3%, transparent);
-  }
   .chart-wrap {
     position: relative;
-    height: 240px;
+    height: 230px;
   }
   .chart-wrap.short {
     height: 200px;
   }
-  .muted {
-    opacity: 0.6;
-    font-size: 0.72rem;
-    font-weight: 400;
-  }
-  footer {
-    margin-top: auto;
-  }
-  .nav-sep {
-    width: 0.5rem;
-  }
-  .toast {
-    font-size: 0.75rem;
-    padding: 0.35rem 0.6rem;
-    border-radius: 6px;
-    border: 1px solid rgba(128, 128, 128, 0.3);
-    opacity: 0.85;
-    align-self: flex-start;
-  }
-  .devices {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-  .dev-row {
-    display: grid;
-    grid-template-columns: 1fr auto auto auto;
-    gap: 0.75rem;
-    align-items: baseline;
-    padding: 0.3rem 0.1rem;
-    border-bottom: 1px solid rgba(128, 128, 128, 0.12);
-  }
-  .dev-host {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dev-tok {
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-  }
-  .dev-cost,
-  .dev-when {
-    font-size: 0.75rem;
-  }
-  .month-stats {
-    display: flex;
-    gap: 2rem;
-    flex-wrap: wrap;
-  }
-  .ms {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-  }
-  .ms-label {
-    font-size: 0.72rem;
-  }
-  .ms-val {
-    font-variant-numeric: tabular-nums;
-    font-weight: 700;
-    font-size: 1.05rem;
-  }
-  .ms-sub {
-    font-size: 0.75rem;
-  }
-  .budget-bar {
-    position: relative;
-    height: 10px;
-    border-radius: 5px;
-    background: rgba(128, 128, 128, 0.18);
-    overflow: hidden;
-    margin-top: 0.5rem;
-  }
-  .budget-fill {
-    display: block;
-    height: 100%;
-    border-radius: 5px;
-    background: #4f8ef7;
-  }
-  .budget-fill.over {
-    background: #e0524f;
-  }
-  /* Month-end projection marker — a tick on the budget bar. */
-  .budget-proj {
-    position: absolute;
-    top: 0;
-    width: 2px;
-    height: 100%;
-    background: color-mix(in srgb, CanvasText 75%, transparent);
-    transform: translateX(-1px);
-  }
-  .projects {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-  .proj-row {
-    display: grid;
-    grid-template-columns: minmax(6rem, 1.4fr) 3fr auto auto;
-    gap: 0.75rem;
-    align-items: center;
-    padding: 0.3rem 0.1rem;
-    border-bottom: 1px solid rgba(128, 128, 128, 0.12);
-  }
-  .proj-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 600;
-  }
-  .proj-bar {
-    display: flex;
-    height: 8px;
-    border-radius: 4px;
-    background: rgba(128, 128, 128, 0.18);
-    overflow: hidden;
-  }
-  .proj-fill {
-    height: 100%;
-  }
-  .proj-legend {
-    display: flex;
-    gap: 0.9rem;
-    margin-bottom: 0.6rem;
-    font-size: 0.72rem;
-  }
-  .proj-legend span {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3em;
-  }
-  .lg-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-    display: inline-block;
-  }
-  .proj-tok {
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-    text-align: right;
-  }
-  .proj-cost {
-    font-size: 0.75rem;
-    text-align: right;
-  }
+
+  /* ---------- Heatmap ---------- */
   .heatmap {
     display: grid;
-    grid-template-columns: 2rem repeat(24, 1fr);
-    /* Thin seams between hour columns only; rows stay contiguous. */
-    column-gap: 2px;
-    row-gap: 0;
-  }
-  .hm-corner {
+    grid-template-columns: 1.8rem repeat(24, 1fr);
+    gap: 3px;
   }
   .hm-hour {
-    font-size: 0.6rem;
-    opacity: 0.55;
+    font-size: 0.58rem;
+    opacity: 0.5;
     text-align: center;
-    padding-bottom: 4px;
+    padding-bottom: 2px;
+    font-variant-numeric: tabular-nums;
   }
   .hm-day {
-    font-size: 0.65rem;
-    opacity: 0.65;
+    font-size: 0.66rem;
+    opacity: 0.6;
     display: flex;
     align-items: center;
-    padding-right: 6px;
+    font-weight: 600;
   }
   .hm-cell {
-    /* Fixed height + stretch width: the cell always fills its grid column, so
-       the tiling stays gapless at any window size. (aspect-ratio + max-height
-       transferred the cap into a max-WIDTH on wide windows, leaving gaps.) */
-    height: 22px;
+    height: 18px;
     min-width: 0;
+    border-radius: 4px;
+    transition: transform 0.1s ease;
   }
-  /* Round only the block's outer corners. */
-  .hm-day + .hm-cell {
-    border-top-left-radius: 4px;
-    border-bottom-left-radius: 4px;
+  .hm-cell:hover {
+    transform: scale(1.25);
+    outline: 1px solid color-mix(in srgb, CanvasText 40%, transparent);
+    z-index: 1;
+    position: relative;
   }
-  .hm-cell:last-child {
-    border-top-right-radius: 4px;
-    border-bottom-right-radius: 4px;
+  .insight {
+    margin: 0.75rem 0 0;
+    font-size: 0.78rem;
+    opacity: 0.75;
+  }
+  .insight b {
+    font-weight: 700;
+    opacity: 1;
+  }
+
+  footer {
+    margin-top: auto;
+    padding-top: 0.25rem;
   }
 </style>

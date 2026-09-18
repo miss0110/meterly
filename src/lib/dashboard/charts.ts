@@ -105,9 +105,9 @@ function baseOptions(t: Theme, opts: { horizontal?: boolean; money?: boolean } =
         labels: {
           color: t.text,
           usePointStyle: true,
-          pointStyle: "rectRounded" as const,
-          boxWidth: 8,
-          boxHeight: 8,
+          pointStyle: "circle" as const,
+          boxWidth: 7,
+          boxHeight: 7,
           font: { size: 10 },
         },
       },
@@ -117,6 +117,8 @@ function baseOptions(t: Theme, opts: { horizontal?: boolean; money?: boolean } =
         bodyColor: t.text,
         borderColor: t.grid,
         borderWidth: 1,
+        cornerRadius: 10,
+        padding: 10,
         callbacks: {
           label: (ctx: any) => {
             const v = opts.horizontal ? ctx.parsed.x : ctx.parsed.y;
@@ -136,9 +138,9 @@ function barStyle(t: Theme, color: string) {
     backgroundColor: color,
     borderColor: t.surface,
     borderWidth: 1,
-    borderRadius: 3,
+    borderRadius: 6,
     borderSkipped: false as const,
-    maxBarThickness: 26,
+    maxBarThickness: 20,
   };
 }
 
@@ -259,9 +261,9 @@ export function renderModelChart(canvas: HTMLCanvasElement, data: DashboardData)
           backgroundColor: colors,
           borderColor: t.surface,
           borderWidth: 1,
-          borderRadius: 3,
+          borderRadius: 6,
           borderSkipped: false,
-          maxBarThickness: 18,
+          maxBarThickness: 14,
         },
       ],
     },
