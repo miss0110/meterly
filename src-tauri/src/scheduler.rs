@@ -1196,9 +1196,26 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
     } else {
         Some(info.states[info.idx % info.states.len()].clone())
     };
+    // Every NSStatusItem mutation — and the drop of the `TrayIcon` handle that
+    // `tray_by_id` clones, which can uninstall the old platform item — must run
+    // on the main thread. This is called from the scheduler's watch loop; doing
+    // it there tripped BoardServices' `assertBarrierOnQueue` on macOS Tahoe and
+    // killed the app with SIGTRAP (DiagnosticReports 2026-09-18 22:15 / 22:22).
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || apply_tray_title_on_main(&app, title));
+}
+
+/// Main-thread half of [`apply_tray_title`]: look the tray up and mutate it.
+/// The `TrayIcon` handle stays inside this frame so it is also dropped here.
+fn apply_tray_title_on_main(app: &AppHandle, title: Option<String>) {
     let Some(tray) = app.tray_by_id("main-tray") else {
         return;
     };
+    let tooltip = match &title {
+        Some(t) => format!("meterly — 오늘 {t}"),
+        None => "meterly".to_string(),
+    };
+
     // macOS: render the value as a FIXED-size template image instead of a text
     // title, so the menu-bar item keeps a constant width as the number changes
     // (a text title reflows on every value change). The full label lives in the
@@ -1224,10 +1241,7 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
             }
         }
         let _ = tray.set_title(None::<&str>);
-        let _ = tray.set_tooltip(Some(match &title {
-            Some(t) => format!("meterly — 오늘 {t}"),
-            None => "meterly".to_string(),
-        }));
+        let _ = tray.set_tooltip(Some(tooltip));
     }
 
     // Windows has no tray title: render the value as the icon bitmap, and put
@@ -1251,17 +1265,14 @@ fn apply_tray_title(app: &AppHandle, info: &TrayInfo) {
                 }
             }
         }
-        let _ = tray.set_tooltip(Some(match title {
-            Some(t) => format!("meterly — 오늘 {t}"),
-            None => "meterly".to_string(),
-        }));
+        let _ = tray.set_tooltip(Some(tooltip));
     }
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let _ = tray.set_tooltip(Some(match title {
-        Some(t) => format!("meterly — 오늘 {t}"),
-        None => "meterly".to_string(),
-    }));
+    {
+        let _ = title; // only the tooltip carries the value here
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
 
 pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
