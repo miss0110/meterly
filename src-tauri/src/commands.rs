@@ -3,7 +3,8 @@
 use tauri::{AppHandle, Manager, State};
 
 use crate::scheduler::{
-    refresh_and_publish, AppState, DashboardData, DevicesData, HeatmapCell, Summary,
+    refresh_and_publish, AppState, DashboardData, DevicesData, HeatmapCell, SessionUsage,
+    Summary,
 };
 
 #[tauri::command]
@@ -30,10 +31,28 @@ pub fn get_dashboard(
     engine.dashboard(&range, scope.as_deref().unwrap_or("local"))
 }
 
+/// Weekday×hour heatmap; `source` = "claude_code" | "codex" narrows to one
+/// tool, omitted/other = both.
 #[tauri::command]
-pub fn get_heatmap(state: State<'_, AppState>) -> Vec<HeatmapCell> {
+pub fn get_heatmap(state: State<'_, AppState>, source: Option<String>) -> Vec<HeatmapCell> {
     let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    engine.heatmap()
+    engine.heatmap(source.as_deref())
+}
+
+/// Most expensive sessions of a local day (`day` = YYYY-MM-DD, default today),
+/// highest cost first. This device only.
+#[tauri::command]
+pub fn get_sessions(
+    state: State<'_, AppState>,
+    day: Option<String>,
+    limit: Option<usize>,
+) -> Vec<SessionUsage> {
+    let date = day
+        .as_deref()
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.sessions(date, limit.unwrap_or(5).clamp(1, 50))
 }
 
 /// Export aggregate rows for a range to ~/Downloads (csv|json). Returns the

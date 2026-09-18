@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::aggregate::{DailyBucket, HourlyBucket};
+use crate::aggregate::{DailyBucket, HourlyBucket, SessionBucket};
 use crate::model::{RateLimitStatus, UsageEvent};
 use crate::sources::SourceCursors;
 
@@ -45,6 +45,12 @@ pub struct CacheV1 {
     pub hourly_claude: Vec<HourlyBucket>,
     #[serde(default)]
     pub hourly_codex: Vec<HourlyBucket>,
+    /// Per-session buckets (last SESSION_RETENTION_DAYS) — the dashboard's
+    /// "가장 비싼 세션" list. Same replace/additive split as daily; local only.
+    #[serde(default)]
+    pub sessions_claude: Vec<SessionBucket>,
+    #[serde(default)]
+    pub sessions_codex: Vec<SessionBucket>,
     /// Tray title mode: "tokens" (default) | "cost" | "icon".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tray_display: Option<String>,

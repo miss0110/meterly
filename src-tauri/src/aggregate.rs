@@ -158,6 +158,166 @@ pub fn prune(buckets: &mut Vec<DailyBucket>, window_start: NaiveDate) {
     buckets.retain(|b| b.date >= window_start);
 }
 
+/// Days of per-session detail kept locally — the "가장 비싼 세션" list. Small
+/// (a few hundred rows) and never synced or reported.
+pub const SESSION_RETENTION_DAYS: i64 = 7;
+
+/// First date whose per-session buckets are retained.
+pub fn session_window_start(today: NaiveDate) -> NaiveDate {
+    today - Duration::days(SESSION_RETENTION_DAYS - 1)
+}
+
+/// One (date, source, session, model) bucket. Keyed on the model too so a
+/// session that mixes models (main + subagent) prices each slice correctly;
+/// the dashboard folds slices back into one session row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionBucket {
+    pub date: NaiveDate,
+    pub source: SourceId,
+    /// Session uuid (log file name) — local only.
+    pub session_id: String,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub first_at: DateTime<Utc>,
+    pub last_at: DateTime<Utc>,
+}
+
+impl SessionBucket {
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_creation
+    }
+
+    pub fn cost_usd(&self) -> Option<f64> {
+        let model = self.model.as_deref()?;
+        pricing::cost_usd(
+            model,
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_creation,
+        )
+    }
+}
+
+/// Fold events into per-session buckets (local date), dropping events before
+/// `window_start`. A session's project is the first one seen.
+pub fn ingest_sessions(
+    buckets: &mut Vec<SessionBucket>,
+    events: &[UsageEvent],
+    window_start: NaiveDate,
+) {
+    for ev in events {
+        let date = local_date(ev.timestamp);
+        if date < window_start {
+            continue;
+        }
+        let found = buckets.iter_mut().find(|b| {
+            b.date == date
+                && b.source == ev.source
+                && b.session_id == ev.session_id
+                && b.model == ev.model
+        });
+        let b = match found {
+            Some(b) => b,
+            None => {
+                buckets.push(SessionBucket {
+                    date,
+                    source: ev.source,
+                    session_id: ev.session_id.clone(),
+                    model: ev.model.clone(),
+                    project: ev.project.clone(),
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_creation: 0,
+                    first_at: ev.timestamp,
+                    last_at: ev.timestamp,
+                });
+                buckets.last_mut().expect("just pushed")
+            }
+        };
+        b.input += ev.input_tokens;
+        b.output += ev.output_tokens;
+        b.cache_read += ev.cache_read_tokens;
+        b.cache_creation += ev.cache_creation_tokens;
+        if ev.timestamp < b.first_at {
+            b.first_at = ev.timestamp;
+        }
+        if ev.timestamp > b.last_at {
+            b.last_at = ev.timestamp;
+        }
+        if b.project.is_none() {
+            b.project = ev.project.clone();
+        }
+    }
+}
+
+pub fn prune_sessions(buckets: &mut Vec<SessionBucket>, window_start: NaiveDate) {
+    buckets.retain(|b| b.date >= window_start);
+}
+
+/// This week vs last week, per weekday (월..일), for the overlay chart.
+/// `*_to_date` compare like-for-like: Monday through today's weekday in both
+/// weeks, so a Wednesday view doesn't pit 3 days against 7.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WeekCompare {
+    /// Monday of this week (local).
+    pub week_start: NaiveDate,
+    /// 0 = 월 … 6 = 일.
+    pub today_weekday: u8,
+    pub this_week: Vec<u64>,
+    pub last_week: Vec<u64>,
+    pub this_cost: Option<f64>,
+    pub last_cost: Option<f64>,
+    pub this_to_date: u64,
+    pub last_to_date: u64,
+}
+
+pub fn week_compare<'a>(
+    buckets: impl Iterator<Item = &'a DailyBucket>,
+    today: NaiveDate,
+) -> WeekCompare {
+    let wd = today.weekday().num_days_from_monday() as usize;
+    let week_start = today - Duration::days(wd as i64);
+    let last_start = week_start - Duration::weeks(1);
+    let mut this_week = vec![0u64; 7];
+    let mut last_week = vec![0u64; 7];
+    let mut this_cost: Option<f64> = None;
+    let mut last_cost: Option<f64> = None;
+    for b in buckets {
+        if b.date >= week_start && b.date <= today {
+            let i = (b.date - week_start).num_days() as usize;
+            this_week[i] += b.total();
+            if let Some(c) = b.cost_usd() {
+                *this_cost.get_or_insert(0.0) += c;
+            }
+        } else if b.date >= last_start && b.date < week_start {
+            let i = (b.date - last_start).num_days() as usize;
+            last_week[i] += b.total();
+            if let Some(c) = b.cost_usd() {
+                *last_cost.get_or_insert(0.0) += c;
+            }
+        }
+    }
+    let this_to_date = this_week[..=wd].iter().sum();
+    let last_to_date = last_week[..=wd].iter().sum();
+    WeekCompare {
+        week_start,
+        today_weekday: wd as u8,
+        this_week,
+        last_week,
+        this_cost,
+        last_cost,
+        this_to_date,
+        last_to_date,
+    }
+}
+
 /// Claude rolling-window ESTIMATE ("추정" label in the UI): tokens and reset
 /// time derived from recent event timestamps — no official quota data exists
 /// on disk for Claude (T1). Window = CLAUDE_WINDOW_HOURS from the earliest
@@ -225,6 +385,81 @@ mod tests {
         for range in ["daily30", "weekly12", "monthly6"] {
             assert!(range_start(range, today).unwrap() >= backfill_start(today));
         }
+    }
+
+    fn ev(day: u32, hour: u32, session: &str, model: &str, tokens: u64) -> UsageEvent {
+        UsageEvent {
+            source: SourceId::ClaudeCode,
+            session_id: session.into(),
+            dedup_key: None,
+            // Local tz may shift the date; use midday so the local date is stable.
+            timestamp: Local
+                .with_ymd_and_hms(2026, 9, day, hour, 0, 0)
+                .unwrap()
+                .with_timezone(&Utc),
+            model: Some(model.into()),
+            project: Some("proj".into()),
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn sessions_fold_per_session_and_model_and_track_span() {
+        let mut b = Vec::new();
+        let events = vec![
+            ev(18, 10, "s1", "claude-opus-5", 100),
+            ev(18, 12, "s1", "claude-opus-5", 50),
+            ev(18, 11, "s1", "claude-haiku-4-5", 7), // subagent slice
+            ev(18, 9, "s2", "claude-opus-5", 1),
+            ev(10, 9, "old", "claude-opus-5", 999), // before window
+        ];
+        let start = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        ingest_sessions(&mut b, &events, start);
+        assert_eq!(b.len(), 3);
+        let s1 = b
+            .iter()
+            .find(|x| x.session_id == "s1" && x.model.as_deref() == Some("claude-opus-5"))
+            .unwrap();
+        assert_eq!(s1.total(), 150);
+        assert_eq!(s1.first_at, events[0].timestamp);
+        assert_eq!(s1.last_at, events[1].timestamp);
+        assert_eq!(s1.project.as_deref(), Some("proj"));
+        prune_sessions(&mut b, NaiveDate::from_ymd_opt(2026, 9, 19).unwrap());
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn week_compare_aligns_weekdays_and_compares_to_date() {
+        // 2026-09-16 is a Wednesday (wd=2); this week starts Mon 09-14.
+        let today = NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+        let mk = |y: i32, m: u32, d: u32, t: u64| DailyBucket {
+            date: NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+            source: SourceId::Codex,
+            model: None,
+            project: None,
+            input: t,
+            output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+        };
+        let buckets = vec![
+            mk(2026, 9, 14, 10), // this Mon
+            mk(2026, 9, 16, 20), // this Wed (today)
+            mk(2026, 9, 7, 5),   // last Mon
+            mk(2026, 9, 9, 6),   // last Wed
+            mk(2026, 9, 13, 100), // last Sun — outside to-date compare
+            mk(2026, 9, 1, 999),  // two weeks ago — ignored
+        ];
+        let w = week_compare(buckets.iter(), today);
+        assert_eq!(w.week_start, NaiveDate::from_ymd_opt(2026, 9, 14).unwrap());
+        assert_eq!(w.today_weekday, 2);
+        assert_eq!(w.this_week, vec![10, 0, 20, 0, 0, 0, 0]);
+        assert_eq!(w.last_week, vec![5, 0, 6, 0, 0, 0, 100]);
+        assert_eq!(w.this_to_date, 30);
+        assert_eq!(w.last_to_date, 11);
     }
 
     #[test]

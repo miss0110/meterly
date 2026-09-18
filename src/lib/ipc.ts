@@ -133,6 +133,20 @@ export interface MonthUsage {
   budget_tokens: number | null;
 }
 
+/** This week vs last week by weekday (0 = 월 … 6 = 일), scope-aware. */
+export interface WeekCompare {
+  /** Monday of this week, YYYY-MM-DD (local). */
+  week_start: string;
+  today_weekday: number;
+  this_week: number[];
+  last_week: number[];
+  this_cost: number | null;
+  last_cost: number | null;
+  /** Monday through today's weekday, both weeks (like-for-like). */
+  this_to_date: number;
+  last_to_date: number;
+}
+
 export interface DashboardData {
   range: string;
   rows: DashboardRow[];
@@ -140,6 +154,22 @@ export interface DashboardData {
   devices: DeviceRangeUsage[];
   projects: ProjectUsage[];
   month: MonthUsage;
+  weeks: WeekCompare;
+}
+
+/** One session's usage for a day — "가장 비싼 세션" list (this device only). */
+export interface SessionUsage {
+  session_id: string;
+  source: SourceId;
+  project: string | null;
+  /** Model with the most tokens in the session. */
+  model: string | null;
+  /** Distinct models used (>1 = main + subagent slices). */
+  model_count: number;
+  tokens: TokenBreakdown;
+  cost_usd: number | null;
+  first_at: string;
+  last_at: string;
 }
 
 export interface HeatmapCell {
@@ -200,7 +230,12 @@ export const openSettings = () => invoke<void>("open_settings");
 export const getDashboard = (range: Range, scope = "local") =>
   invoke<DashboardData>("get_dashboard", { range, scope });
 export const refreshNow = () => invoke<Summary | null>("refresh_now");
-export const getHeatmap = () => invoke<HeatmapCell[]>("get_heatmap");
+/** source: "all" (both tools) | a SourceId to narrow the heatmap to one tool. */
+export const getHeatmap = (source: SourceId | "all" = "all") =>
+  invoke<HeatmapCell[]>("get_heatmap", { source: source === "all" ? null : source });
+/** day: YYYY-MM-DD local (default today); highest cost first. */
+export const getSessions = (day?: string, limit = 5) =>
+  invoke<SessionUsage[]>("get_sessions", { day: day ?? null, limit });
 export const exportData = (range: Range, format: "csv" | "json") =>
   invoke<string>("export_data", { range, format });
 export const openDashboard = () => invoke<void>("open_dashboard");

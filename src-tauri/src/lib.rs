@@ -297,6 +297,7 @@ pub fn run() {
             commands::refresh_now,
             commands::open_dashboard,
             commands::get_heatmap,
+            commands::get_sessions,
             commands::export_data,
             commands::get_devices,
             commands::get_settings,

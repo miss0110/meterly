@@ -5,10 +5,13 @@
     getSummary,
     getDevices,
     getHeatmap,
+    getSessions,
     exportData,
     onUsageUpdated,
     type DashboardData,
     type HeatmapCell,
+    type SessionUsage,
+    type SourceId,
     type TokenBreakdown,
     type Range,
     type Summary,
@@ -26,6 +29,8 @@
     renderCompositionChart,
     renderCostChart,
     renderModelChart,
+    renderModelTrendChart,
+    renderWeekCompareChart,
     theme,
     SOURCE_LABELS,
   } from "./charts";
@@ -45,21 +50,77 @@
   let data = $state<DashboardData | null>(null);
   let summary = $state<Summary | null>(null);
   let heatmap = $state<HeatmapCell[]>([]);
+  // Heatmap tool filter: both tools, or one source.
+  let heatSource = $state<SourceId | "all">("all");
+  let sessions = $state<SessionUsage[]>([]);
+  let sessionDay = $state<"today" | "yesterday">("today");
   let exportMsg = $state<string | null>(null);
   let trendCanvas: HTMLCanvasElement;
   let compositionCanvas: HTMLCanvasElement;
   let costCanvas: HTMLCanvasElement;
   let modelCanvas: HTMLCanvasElement;
+  let modelTrendCanvas: HTMLCanvasElement;
+  let weekCanvas: HTMLCanvasElement;
 
   const t = theme();
 
   async function load() {
-    data = await getDashboard(range, scope);
-    renderTrendChart(trendCanvas, data);
-    renderCompositionChart(compositionCanvas, data);
-    renderCostChart(costCanvas, data);
-    renderModelChart(modelCanvas, data);
-    heatmap = await getHeatmap();
+    const d = await getDashboard(range, scope);
+    data = d;
+    // Each chart on its own: one renderer failing must not blank the rest
+    // (or skip the heatmap/session loads below).
+    const charts: [string, () => void][] = [
+      ["trend", () => renderTrendChart(trendCanvas, d)],
+      ["composition", () => renderCompositionChart(compositionCanvas, d)],
+      ["cost", () => renderCostChart(costCanvas, d)],
+      ["model", () => renderModelChart(modelCanvas, d)],
+      ["model-trend", () => renderModelTrendChart(modelTrendCanvas, d)],
+      ["week", () => renderWeekCompareChart(weekCanvas, d.weeks)],
+    ];
+    for (const [name, render] of charts) {
+      try {
+        render();
+      } catch (e) {
+        console.error(`chart ${name} failed`, e);
+      }
+    }
+    heatmap = await getHeatmap(heatSource);
+    await loadSessions();
+  }
+
+  /** Local calendar date `offset` days from today, YYYY-MM-DD. */
+  function localDay(offset: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() + offset);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  async function loadSessions() {
+    sessions = await getSessions(localDay(sessionDay === "today" ? 0 : -1), 5);
+  }
+
+  function selectSessionDay(d: "today" | "yesterday") {
+    sessionDay = d;
+    loadSessions();
+  }
+
+  async function selectHeatSource(s: SourceId | "all") {
+    heatSource = s;
+    heatmap = await getHeatmap(s);
+  }
+
+  function clock(iso: string): string {
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  /** "1h 20m" / "35m" / "<1m" span of a session. */
+  function span(startIso: string, endIso: string): string {
+    const m = Math.round((new Date(endIso).getTime() - new Date(startIso).getTime()) / 60_000);
+    if (m < 1) return "<1m";
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
   }
 
   function selectScope(s: string) {
@@ -80,11 +141,29 @@
     // Faint base (not transparent) so the gapless grid still shows empty cells.
     if (total === 0) return "color-mix(in srgb, currentColor 8%, transparent)";
     // sqrt scale: heavy-tail token counts would otherwise flatten the ramp.
-    const idx = Math.min(
-      t.seq.length - 1,
-      1 + Math.floor(Math.sqrt(total / heatmapMax) * (t.seq.length - 1)),
-    );
+    const k = Math.sqrt(total / heatmapMax);
+    if (heatSource !== "all") {
+      // Single tool: ramp in that tool's hue so the filter is legible at a glance.
+      const pct = Math.round(18 + k * 82);
+      return `color-mix(in srgb, ${t.sources[heatSource]} ${pct}%, transparent)`;
+    }
+    const idx = Math.min(t.seq.length - 1, 1 + Math.floor(k * (t.seq.length - 1)));
     return t.seq[idx];
+  }
+
+  const HEAT_SOURCES: { key: SourceId | "all"; label: string }[] = [
+    { key: "all", label: "전체" },
+    { key: "claude_code", label: "Claude" },
+    { key: "codex", label: "Codex" },
+  ];
+
+  /** Week-over-week like-for-like caption (월 → today's weekday, both weeks). */
+  function weekDelta(d: DashboardData): { text: string; dir: "up" | "down" | "flat" } | null {
+    const w = d.weeks;
+    if (w.last_to_date === 0) return w.this_to_date > 0 ? { text: "지난 주 같은 기간 사용 없음", dir: "flat" } : null;
+    const pct = ((w.this_to_date - w.last_to_date) / w.last_to_date) * 100;
+    const dir = pct > 5 ? "up" : pct < -5 ? "down" : "flat";
+    return { text: `${pct > 0 ? "+" : ""}${pct.toFixed(0)}%`, dir };
   }
 
   function cellAt(wd: number, hour: number): number {
@@ -358,6 +437,37 @@
     </section>
   {/if}
 
+  <section class="panel">
+    <div class="panel-head">
+      <h2>가장 비싼 세션 <span class="muted">Top 5 · 이 기기 · {LABEL_COST}</span></h2>
+      <div class="seg mini" role="tablist" aria-label="세션 날짜">
+        <button role="tab" aria-selected={sessionDay === "today"} class:active={sessionDay === "today"} onclick={() => selectSessionDay("today")}>오늘</button>
+        <button role="tab" aria-selected={sessionDay === "yesterday"} class:active={sessionDay === "yesterday"} onclick={() => selectSessionDay("yesterday")}>어제</button>
+      </div>
+    </div>
+    {#if sessions.length}
+      <div class="rows">
+        {#each sessions as s, i (s.source + s.session_id)}
+          <div class="sess-row" style={`--accent:${t.sources[s.source] ?? "#8a8983"}`}>
+            <span class="rank">{i + 1}</span>
+            <span class="r-name" title={s.project ?? "프로젝트 미기록"}>
+              <span class="src-dot" title={SOURCE_LABELS[s.source]}></span>
+              {s.project ?? "(미분류)"}
+            </span>
+            <span class="r-name mono" title={s.model_count > 1 ? `${s.model_count}개 모델 사용 — 가장 많이 쓴 모델 표시` : ""}>
+              {s.model ?? "unknown"}{#if s.model_count > 1}<span class="plus">+{s.model_count - 1}</span>{/if}
+            </span>
+            <span class="r-sub" title="세션 시작 – 마지막 응답">{clock(s.first_at)}–{clock(s.last_at)} · {span(s.first_at, s.last_at)}</span>
+            <span class="r-num">{formatTokens(s.tokens.total)}<span class="unit">tok</span></span>
+            <span class="r-cost">{s.cost_usd === null ? LABEL_COST_NA : formatCost(s.cost_usd)}</span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="muted small empty">{sessionDay === "today" ? "오늘" : "어제"} 기록된 세션이 없습니다.</p>
+    {/if}
+  </section>
+
   {#if scope === "all" && data && data.devices.length}
     <section class="panel">
       <h2>기기별 <span class="muted">기간 합계</span></h2>
@@ -428,6 +538,35 @@
 
   <section class="grid-2">
     <div class="panel">
+      <h2>모델별 추이 <span class="muted">어떤 모델로 옮겨갔는지</span></h2>
+      <div class="chart-wrap"><canvas bind:this={modelTrendCanvas}></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>이번 주 vs 지난 주 <span class="muted">요일별</span></h2>
+        {#if data}
+          {@const wd = weekDelta(data)}
+          {#if wd}
+            <span class="delta {wd.dir}" title="월요일부터 오늘 요일까지, 두 주를 같은 기간으로 비교">{wd.text} vs 지난 주</span>
+          {/if}
+        {/if}
+      </div>
+      <div class="chart-wrap"><canvas bind:this={weekCanvas}></canvas></div>
+      {#if data}
+        {@const w = data.weeks}
+        <p class="insight">
+          월–{WEEKDAYS[w.today_weekday]} 기준 이번 주 <b>{formatTokens(w.this_to_date)}</b>
+          · 지난 주 같은 기간 <b>{formatTokens(w.last_to_date)}</b>
+          {#if w.this_cost !== null || w.last_cost !== null}
+            · {LABEL_COST} {formatCost(w.this_cost ?? 0)} / 지난 주 전체 {formatCost(w.last_cost ?? 0)}
+          {/if}
+        </p>
+      {/if}
+    </div>
+  </section>
+
+  <section class="grid-2">
+    <div class="panel">
       <h2>비용 추이 <span class="muted">{LABEL_COST}, 알려진 모델만</span></h2>
       <div class="chart-wrap short"><canvas bind:this={costCanvas}></canvas></div>
     </div>
@@ -436,6 +575,52 @@
       <div class="chart-wrap short"><canvas bind:this={modelCanvas}></canvas></div>
     </div>
   </section>
+
+  {#snippet heatmapPanel()}
+    <div class="panel">
+      <div class="panel-head">
+        <h2>사용 패턴 <span class="muted">요일×시간, 이 기기</span></h2>
+        <div class="seg mini" role="tablist" aria-label="히트맵 도구">
+          {#each HEAT_SOURCES as hs (hs.key)}
+            <button
+              role="tab"
+              aria-selected={heatSource === hs.key}
+              class:active={heatSource === hs.key}
+              style={hs.key !== "all" ? `--seg-accent:${t.sources[hs.key]}` : ""}
+              onclick={() => selectHeatSource(hs.key)}
+            >
+              {hs.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+      <div class="heatmap">
+        <div class="hm-corner"></div>
+        {#each Array(24) as _, h}
+          <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
+        {/each}
+        {#each WEEKDAYS as day, wd}
+          <div class="hm-day">{day}</div>
+          {#each Array(24) as _, h}
+            <div
+              class="hm-cell"
+              style={`background:${heatColor(cellAt(wd, h))}`}
+              title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
+            ></div>
+          {/each}
+        {/each}
+      </div>
+      {#if heatInsight}
+        <p class="insight">
+          가장 활발한 시간 <b>{heatInsight.day} {heatInsight.hour}시</b>
+          {#if heatInsight.span}· 활동 시간대 <b>{heatInsight.span}</b>{/if}
+          {#if heatSource !== "all"}<span class="muted"> · {SOURCE_LABELS[heatSource]}만</span>{/if}
+        </p>
+      {:else if heatSource !== "all"}
+        <p class="insight muted">{SOURCE_LABELS[heatSource]} 사용 기록이 없습니다.</p>
+      {/if}
+    </div>
+  {/snippet}
 
   {#if data}
     {@const mc = modelCosts(data)}
@@ -454,58 +639,10 @@
             {/each}
           </div>
         </div>
-        <div class="panel">
-          <h2>사용 패턴 <span class="muted">요일×시간, 이 기기</span></h2>
-          <div class="heatmap">
-            <div class="hm-corner"></div>
-            {#each Array(24) as _, h}
-              <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
-            {/each}
-            {#each WEEKDAYS as day, wd}
-              <div class="hm-day">{day}</div>
-              {#each Array(24) as _, h}
-                <div
-                  class="hm-cell"
-                  style={`background:${heatColor(cellAt(wd, h))}`}
-                  title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
-                ></div>
-              {/each}
-            {/each}
-          </div>
-          {#if heatInsight}
-            <p class="insight">
-              가장 활발한 시간 <b>{heatInsight.day} {heatInsight.hour}시</b>
-              {#if heatInsight.span}· 활동 시간대 <b>{heatInsight.span}</b>{/if}
-            </p>
-          {/if}
-        </div>
+        {@render heatmapPanel()}
       </section>
     {:else}
-      <section class="panel">
-        <h2>사용 패턴 <span class="muted">요일×시간, 이 기기</span></h2>
-        <div class="heatmap">
-          <div class="hm-corner"></div>
-          {#each Array(24) as _, h}
-            <div class="hm-hour">{h % 3 === 0 ? h : ""}</div>
-          {/each}
-          {#each WEEKDAYS as day, wd}
-            <div class="hm-day">{day}</div>
-            {#each Array(24) as _, h}
-              <div
-                class="hm-cell"
-                style={`background:${heatColor(cellAt(wd, h))}`}
-                title={`${day} ${h}시 — ${formatTokens(cellAt(wd, h))} tok`}
-              ></div>
-            {/each}
-          {/each}
-        </div>
-        {#if heatInsight}
-          <p class="insight">
-            가장 활발한 시간 <b>{heatInsight.day} {heatInsight.hour}시</b>
-            {#if heatInsight.span}· 활동 시간대 <b>{heatInsight.span}</b>{/if}
-          </p>
-        {/if}
-      </section>
+      <section>{@render heatmapPanel()}</section>
     {/if}
   {/if}
 
@@ -597,6 +734,25 @@
   .seg.ghost button {
     font-weight: 500;
     padding: 0.28rem 0.6rem;
+  }
+  /* Compact segmented control inside a panel header. */
+  .seg.mini {
+    padding: 2px;
+  }
+  .seg.mini button {
+    font-size: 0.68rem;
+    padding: 0.18rem 0.6rem;
+  }
+  .seg.mini button.active {
+    background: linear-gradient(
+      135deg,
+      var(--seg-accent, #4f8ef7),
+      color-mix(in srgb, var(--seg-accent, #6a5cf5) 70%, #6a5cf5)
+    );
+    box-shadow: 0 6px 14px -8px color-mix(in srgb, var(--seg-accent, #4f8ef7) 80%, transparent);
+  }
+  .panel-head .seg {
+    margin-bottom: 0.8rem;
   }
   .scope-select {
     font: inherit;
@@ -903,6 +1059,52 @@
     font-size: 0.86rem;
   }
   .row4 { grid-template-columns: 1fr auto auto auto; }
+  .sess-row {
+    display: grid;
+    grid-template-columns: 1.4rem minmax(6rem, 1.2fr) minmax(8rem, 1.2fr) auto auto 5rem;
+    gap: 0.9rem;
+    align-items: center;
+    padding: 0.42rem 0.55rem;
+    border-radius: 10px;
+    font-size: 0.86rem;
+  }
+  .sess-row:hover {
+    background: color-mix(in srgb, currentColor 5%, transparent);
+  }
+  .rank {
+    font-size: 0.7rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.45;
+    text-align: center;
+  }
+  .src-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .plus {
+    font-size: 0.62rem;
+    font-weight: 700;
+    opacity: 0.55;
+    margin-left: 0.35em;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 9%, transparent);
+  }
+  .r-cost {
+    font-variant-numeric: tabular-nums;
+    font-weight: 800;
+    text-align: right;
+    white-space: nowrap;
+    color: #4f8ef7;
+  }
+  .empty {
+    margin: 0.2rem 0 0;
+  }
   .proj-row { grid-template-columns: minmax(7rem, 1.3fr) 3fr auto auto; }
   .mc-row { grid-template-columns: minmax(9rem, 1.4fr) 3fr auto 3.2rem; }
   .row4:hover,

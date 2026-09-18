@@ -13,7 +13,7 @@ import {
   Legend,
   Tooltip,
 } from "chart.js";
-import type { DashboardData, SourceId } from "../ipc";
+import type { DashboardData, SourceId, WeekCompare } from "../ipc";
 import { formatTokens } from "../format";
 
 Chart.register(BarController, BarElement, CategoryScale, LinearScale, Legend, Tooltip);
@@ -77,16 +77,20 @@ function replaceChart(canvas: HTMLCanvasElement, config: any): void {
 }
 
 /** Shared look: recessive grid/axes, thin marks, legend as small chips. */
-function baseOptions(t: Theme, opts: { horizontal?: boolean; money?: boolean } = {}) {
+function baseOptions(
+  t: Theme,
+  opts: { horizontal?: boolean; money?: boolean; stacked?: boolean } = {},
+) {
   const fmt = (v: number) => (opts.money ? `$${v}` : formatTokens(v));
+  const stacked = opts.stacked ?? true;
   const valueAxis = {
-    stacked: true,
+    stacked,
     grid: { color: t.grid },
     border: { display: false },
     ticks: { color: t.text, font: { size: 10 }, callback: (v: any) => fmt(Number(v)) },
   };
   const labelAxis = {
-    stacked: true,
+    stacked,
     grid: { display: false },
     border: { display: false },
     ticks: { color: t.text, font: { size: 10 }, maxRotation: 0, autoSkip: true },
@@ -264,6 +268,80 @@ export function renderModelChart(canvas: HTMLCanvasElement, data: DashboardData)
           borderRadius: 6,
           borderSkipped: false,
           maxBarThickness: 14,
+        },
+      ],
+    },
+    options,
+  });
+}
+
+/** 모델별 추이: stacked bars per period, one dataset per model (top 6 + 기타).
+ * Shows model migration over time (e.g. Opus 4.8 → Opus 5). Hues follow the
+ * MODEL (alphabetical slot among the shown set), matching 모델별 비교. */
+export function renderModelTrendChart(canvas: HTMLCanvasElement, data: DashboardData): void {
+  const t = theme();
+  const periods = periodsOf(data);
+  const totals = new Map<string, number>();
+  for (const r of data.rows) {
+    const k = r.model ?? "unknown";
+    totals.set(k, (totals.get(k) ?? 0) + r.tokens.total);
+  }
+  const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+  const shown = ranked.slice(0, 6).map(([m]) => m);
+  const rest = new Set(ranked.slice(6).map(([m]) => m));
+  const alpha = [...shown].sort();
+  const colorOf = (m: string) => t.modelSlots[alpha.indexOf(m) % t.modelSlots.length];
+  const sumFor = (p: string, pick: (m: string) => boolean) =>
+    data.rows
+      .filter((r) => r.period === p && pick(r.model ?? "unknown"))
+      .reduce((s, r) => s + r.tokens.total, 0);
+  const datasets: any[] = shown.map((m) => ({
+    label: m,
+    ...barStyle(t, colorOf(m)),
+    data: periods.map((p) => sumFor(p, (x) => x === m)),
+  }));
+  if (rest.size) {
+    datasets.push({
+      label: "기타",
+      ...barStyle(t, t.other),
+      data: periods.map((p) => sumFor(p, (x) => rest.has(x))),
+    });
+  }
+  replaceChart(canvas, {
+    type: "bar",
+    data: { labels: periods, datasets },
+    options: baseOptions(t),
+  });
+}
+
+/** 주간 비교: grouped bars, 지난 주 (muted) beside 이번 주 (accent), per weekday.
+ * Days of this week still ahead are left empty rather than drawn as zero. */
+export function renderWeekCompareChart(canvas: HTMLCanvasElement, w: WeekCompare): void {
+  const t = theme();
+  const labels = ["월", "화", "수", "목", "금", "토", "일"];
+  // Copy out of the Svelte $state proxy: Chart.js defines properties on the
+  // data arrays it is handed, which a reactive proxy rejects.
+  const lastWeek = [...w.last_week];
+  const thisWeek = w.this_week.map((v, i) => (i <= w.today_weekday ? v : null));
+  const options = baseOptions(t, { stacked: false });
+  (options.plugins as any).tooltip.callbacks.label = (ctx: any) =>
+    ctx.parsed.y == null
+      ? `${ctx.dataset.label}: —`
+      : `${ctx.dataset.label}: ${formatTokens(ctx.parsed.y)} tok`;
+  replaceChart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "지난 주",
+          ...barStyle(t, "rgba(138, 137, 131, 0.45)"),
+          data: lastWeek,
+        },
+        {
+          label: "이번 주",
+          ...barStyle(t, "#4f8ef7"),
+          data: thisWeek,
         },
       ],
     },

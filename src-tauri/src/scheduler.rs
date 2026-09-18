@@ -311,6 +311,8 @@ pub struct DashboardData {
     pub projects: Vec<ProjectUsage>,
     /// This month's usage + projection (independent of `range`).
     pub month: MonthUsage,
+    /// This week vs last week by weekday (independent of `range`, scope-aware).
+    pub weeks: aggregate::WeekCompare,
 }
 
 impl Engine {
@@ -371,6 +373,12 @@ impl Engine {
                             &outcome.events,
                             window_start,
                         );
+                        self.cache.sessions_claude.clear();
+                        aggregate::ingest_sessions(
+                            &mut self.cache.sessions_claude,
+                            &outcome.events,
+                            aggregate::session_window_start(today),
+                        );
                         let cutoff =
                             Utc::now() - chrono::Duration::hours(aggregate::RECENT_RETENTION_HOURS);
                         self.cache
@@ -393,6 +401,7 @@ impl Engine {
                         self.cache.codex_cursors = SourceCursors::default();
                         self.cache.daily_codex.clear();
                         self.cache.hourly_codex.clear();
+                        self.cache.sessions_codex.clear();
                         outcome = rt.source.scan(&SourceCursors::default());
                     }
                     aggregate::ingest(&mut self.cache.daily_codex, &outcome.events, window_start);
@@ -400,6 +409,11 @@ impl Engine {
                         &mut self.cache.hourly_codex,
                         &outcome.events,
                         window_start,
+                    );
+                    aggregate::ingest_sessions(
+                        &mut self.cache.sessions_codex,
+                        &outcome.events,
+                        aggregate::session_window_start(today),
                     );
                     if let Some(cursors) = outcome.cursors {
                         self.cache.codex_cursors = cursors;
@@ -426,6 +440,9 @@ impl Engine {
         aggregate::prune(&mut self.cache.daily_codex, window_start);
         aggregate::prune_hourly(&mut self.cache.hourly_claude, window_start);
         aggregate::prune_hourly(&mut self.cache.hourly_codex, window_start);
+        let session_start = aggregate::session_window_start(today);
+        aggregate::prune_sessions(&mut self.cache.sessions_claude, session_start);
+        aggregate::prune_sessions(&mut self.cache.sessions_codex, session_start);
 
         // Real Claude /usage via the `claude` CLI — throttled (shell-out is
         // ~seconds). Keep the last good reading on failure; only bump the
@@ -439,6 +456,12 @@ impl Engine {
                 self.cache.claude_cli_usage = Some((Utc::now(), fetched));
             } else if let Some((at, _)) = self.cache.claude_cli_usage.as_mut() {
                 *at = Utc::now();
+            } else {
+                // No reading to keep, but record the attempt: without it a
+                // signed-out (or fresh) install shells out on EVERY refresh —
+                // and refreshes fire on each log write while the user codes.
+                // `Unavailable` reads as "use the estimate" downstream.
+                self.cache.claude_cli_usage = Some((Utc::now(), RateLimitStatus::Unavailable));
             }
         }
 
@@ -883,6 +906,7 @@ impl Engine {
             devices,
             projects,
             month,
+            weeks: aggregate::week_compare(buckets.iter(), today),
         }
     }
 
@@ -903,12 +927,40 @@ pub struct HeatmapCell {
     pub total: u64,
 }
 
+/// One session's usage for a day — the "가장 비싼 세션" list. Local only.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub source: SourceId,
+    pub project: Option<String>,
+    /// Model with the most tokens in this session.
+    pub model: Option<String>,
+    /// Distinct models used (>1 = main + subagent/haiku slices).
+    pub model_count: usize,
+    pub tokens: TokenBreakdown,
+    pub cost_usd: Option<f64>,
+    pub first_at: chrono::DateTime<Utc>,
+    pub last_at: chrono::DateTime<Utc>,
+}
+
 impl Engine {
-    /// Weekday×hour token totals over the whole backfill window.
-    pub fn heatmap(&self) -> Vec<HeatmapCell> {
+    /// Weekday×hour token totals over the whole backfill window. `source`
+    /// narrows to one tool ("claude_code" | "codex"); anything else = both.
+    pub fn heatmap(&self, source: Option<&str>) -> Vec<HeatmapCell> {
         use chrono::Datelike;
         let mut grid = [[0u64; 24]; 7];
-        for b in self.cache.hourly_claude.iter().chain(self.cache.hourly_codex.iter()) {
+        let only = match source {
+            Some("claude_code") => Some(SourceId::ClaudeCode),
+            Some("codex") => Some(SourceId::Codex),
+            _ => None,
+        };
+        for b in self
+            .cache
+            .hourly_claude
+            .iter()
+            .chain(self.cache.hourly_codex.iter())
+            .filter(|b| only.map_or(true, |s| b.source == s))
+        {
             let wd = b.date.weekday().num_days_from_monday() as usize;
             grid[wd][b.hour as usize] += b.total;
         }
@@ -923,6 +975,72 @@ impl Engine {
             }
         }
         cells
+    }
+
+    /// Most expensive sessions of one local day (this device only — synced
+    /// files carry daily totals, not sessions). Model slices of a session fold
+    /// into one row whose `model` is the slice with the most tokens. Ranked by
+    /// API-equivalent cost, unpriced sessions by tokens after the priced ones.
+    pub fn sessions(&self, date: NaiveDate, limit: usize) -> Vec<SessionUsage> {
+        let mut by_session: HashMap<(SourceId, String), SessionUsage> = HashMap::new();
+        let mut main_slice: HashMap<(SourceId, String), u64> = HashMap::new();
+        for b in self
+            .cache
+            .sessions_claude
+            .iter()
+            .chain(self.cache.sessions_codex.iter())
+            .filter(|b| b.date == date)
+        {
+            let key = (b.source, b.session_id.clone());
+            let su = by_session.entry(key.clone()).or_insert_with(|| SessionUsage {
+                session_id: b.session_id.clone(),
+                source: b.source,
+                project: b.project.clone(),
+                model: None,
+                model_count: 0,
+                tokens: TokenBreakdown {
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_creation: 0,
+                    total: 0,
+                },
+                cost_usd: None,
+                first_at: b.first_at,
+                last_at: b.last_at,
+            });
+            su.tokens.input += b.input;
+            su.tokens.output += b.output;
+            su.tokens.cache_read += b.cache_read;
+            su.tokens.cache_creation += b.cache_creation;
+            su.tokens.total += b.total();
+            su.model_count += 1;
+            if let Some(c) = b.cost_usd() {
+                *su.cost_usd.get_or_insert(0.0) += c;
+            }
+            if su.project.is_none() {
+                su.project = b.project.clone();
+            }
+            su.first_at = su.first_at.min(b.first_at);
+            su.last_at = su.last_at.max(b.last_at);
+            let best = main_slice.entry(key).or_insert(0);
+            if b.total() >= *best {
+                *best = b.total();
+                su.model = b.model.clone();
+            }
+        }
+        let mut out: Vec<SessionUsage> = by_session.into_values().collect();
+        out.sort_by(|a, b| match (a.cost_usd, b.cost_usd) {
+            (Some(x), Some(y)) => y
+                .partial_cmp(&x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.tokens.total.cmp(&a.tokens.total)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.tokens.total.cmp(&a.tokens.total),
+        });
+        out.truncate(limit);
+        out
     }
 
     /// Export the current range's aggregate rows to ~/Downloads.
