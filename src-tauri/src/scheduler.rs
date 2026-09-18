@@ -514,7 +514,34 @@ impl Engine {
             })
             .collect();
         crate::logging::info(&format!("refresh: {}", parts.join(", ")));
+        self.warn_about_unpriced_models();
         summary
+    }
+
+    /// Name any model in today's buckets that the price table doesn't know.
+    /// Such a model contributes tokens but no cost, and when it's the only one
+    /// a source used that day the card shows "API 환산 N/A" with no hint why —
+    /// so say it out loud once per cycle instead of failing silently.
+    fn warn_about_unpriced_models(&self) {
+        let today = Local::now().date_naive();
+        let mut unpriced: Vec<&str> = self
+            .all_buckets()
+            .into_iter()
+            // Zero-token buckets (e.g. Claude's "<synthetic>" placeholder
+            // turns) cost nothing either way — not worth naming.
+            .filter(|b| b.date == today && b.total() > 0)
+            .filter_map(|b| b.model.as_deref())
+            .filter(|m| crate::pricing::price_for(m).is_none())
+            .collect();
+        unpriced.sort_unstable();
+        unpriced.dedup();
+        if !unpriced.is_empty() {
+            crate::logging::warn(&format!(
+                "pricing: no price for {} — their usage is excluded from the cost figures \
+                 (add them to PRICE_TABLE)",
+                unpriced.join(", ")
+            ));
+        }
     }
 
     /// Per-device today usage for the combined view. The current device comes
