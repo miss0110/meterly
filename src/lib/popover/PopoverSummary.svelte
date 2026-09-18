@@ -266,7 +266,7 @@
 
 <div class="popover">
   <header>
-    <span class="app-name">meterly</span>
+    <span class="app-name"><span class="orb" aria-hidden="true"></span>meterly</span>
     <div class="head-right">
       {#if showToggle}
         <select class="scope" bind:value={view} aria-label="기기 선택">
@@ -305,22 +305,20 @@
         <div class="head">
           <span class="name"><span class="dot"></span>{s.display_name}</span>
           <div class="headline">
-            {#if !healthError(s)}
-              <Sparkline
-                values={shownLast7(s)}
-                color={t.sources[s.id] ?? "#8a8983"}
-                width={64}
-                height={20}
-              />
-            {/if}
             {#if healthError(s)}
               <span class="warn" title={healthError(s)}>{LABEL_READ_ERROR}</span>
             {:else}
               <span
                 class="tokens"
                 title="이 기기의 로컬 세션 토큰 합계 · 계정 무관 (로그에 계정 구분이 없어 여러 계정 사용분이 합쳐집니다). 아래 한도 게이지만 현재 로그인 계정 기준입니다."
-                >{formatTokens(shownTokens(s).total)}<span class="unit"> tok</span></span
+                >{formatTokens(shownTokens(s).total)}<span class="unit">tok</span></span
               >
+              <Sparkline
+                values={shownLast7(s)}
+                color={t.sources[s.id] ?? "#8a8983"}
+                width={120}
+                height={26}
+              />
             {/if}
           </div>
         </div>
@@ -336,22 +334,28 @@
           {@const tk = shownTokens(s)}
           {@const cost = shownCost(s)}
           {@const saved = shownSaved(s)}
-          <div class="stats">
-            <span class="muted io">
-              in {formatTokens(tk.input)} · out
-              {formatTokens(tk.output)} · cache
-              {formatTokens(tk.cache_read + tk.cache_creation)}
-            </span>
-            <span class="cost" title="구독 요금이 아닌 API 정가 환산값">
-              <span class="cost-main"
-                >{LABEL_COST} {cost === null ? LABEL_COST_NA : formatCost(cost)}</span
-              >
-              {#if saved !== null && saved >= 0.01}
-                <span class="saved" title="캐시 읽기를 정가 입력으로 환산했을 때 대비 절약액">
-                  캐시로 {formatCost(saved)} 절약
-                </span>
-              {/if}
-            </span>
+          <div class="tiles">
+            <div class="tile">
+              <span class="tile-k">in</span>
+              <span class="tile-v">{formatTokens(tk.input)}</span>
+            </div>
+            <div class="tile">
+              <span class="tile-k">out</span>
+              <span class="tile-v">{formatTokens(tk.output)}</span>
+            </div>
+            <div class="tile">
+              <span class="tile-k">cache</span>
+              <span class="tile-v">{formatTokens(tk.cache_read + tk.cache_creation)}</span>
+            </div>
+          </div>
+          <div class="cost" title="구독 요금이 아닌 API 정가 환산값">
+            <span class="cost-k">{LABEL_COST}</span>
+            <span class="cost-v">{cost === null ? LABEL_COST_NA : formatCost(cost)}</span>
+            {#if saved !== null && saved >= 0.01}
+              <span class="saved" title="캐시 읽기를 정가 입력으로 환산했을 때 대비 절약액">
+                캐시 {formatCost(saved)} 절약
+              </span>
+            {/if}
           </div>
 
           <div class="limits">
@@ -365,7 +369,7 @@
             {:else if s.rate_limit === "unavailable"}
               <span class="muted small">한도 정보 없음</span>
             {:else if "estimated" in s.rate_limit}
-              <span class="muted small">
+              <span class="muted small est">
                 <b class="badge">{LABEL_ESTIMATED}</b>
                 {s.rate_limit.estimated.window_hours}시간 창
                 {formatTokens(s.rate_limit.estimated.window_tokens)} tok ·
@@ -377,7 +381,7 @@
               {@const uv = usageView(s.rate_limit)}
               {#if uv}
                 <div class="usage">
-                  <span class="lim-head"><b class="badge">{uv.badge}</b></span>
+                  <span class="lim-head"><b class="badge live">{uv.badge}</b></span>
                   {#each uv.rows as r}
                     {@const shown = pctMode === "remaining" ? Math.max(0, 100 - r.percent) : r.percent}
                     <!-- warn/crit always key on USED percent, whatever is shown. -->
@@ -386,16 +390,18 @@
                       <span class="meter">
                         <span class="fill" style={`width:${Math.min(100, shown)}%`}></span>
                       </span>
-                      <span class="uwin-pct">
-                        {shown.toFixed(0)}%{pctMode === "remaining" ? " 남음" : ""}
-                      </span>
-                      {#if r.reset}
-                        <span class="muted small reset" title={`리셋 ${r.reset}`}>
-                          리셋 {r.resetAt && r.resetAt.getTime() > now
-                            ? formatCountdown(r.resetAt, now)
-                            : r.reset}
+                      <span class="uwin-meta">
+                        <span class="uwin-pct">
+                          {shown.toFixed(0)}%{pctMode === "remaining" ? " 남음" : ""}
                         </span>
-                      {/if}
+                        {#if r.reset}
+                          <span class="reset" title={`리셋 ${r.reset}`}>
+                            {r.resetAt && r.resetAt.getTime() > now
+                              ? `${formatCountdown(r.resetAt, now)} 리셋`
+                              : `리셋 ${r.reset}`}
+                          </span>
+                        {/if}
+                      </span>
                     </div>
                   {/each}
                 </div>
@@ -437,74 +443,158 @@
 </div>
 
 <style>
+  /* ---------- Shell ---------- */
   .popover {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.75rem;
+    gap: 0.6rem;
+    padding: 0.85rem 0.85rem 0.8rem;
     height: 100%;
     box-sizing: border-box;
+    /* Ambient light at the top so cards float on depth, not on flat Canvas. */
+    background:
+      radial-gradient(
+        120% 70% at 50% -20%,
+        color-mix(in srgb, #4f8ef7 14%, transparent),
+        transparent 60%
+      );
   }
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     flex: 0 0 auto;
+    padding: 0 0.15rem;
   }
-  /* Scrolls when content (many cards / many devices) exceeds the window;
-     header and footer stay pinned so "대시보드 열기" is always reachable. */
+  .app-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 800;
+    font-size: 1.05rem;
+    letter-spacing: -0.01em;
+  }
+  .orb {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #eb6834, #4f8ef7);
+    box-shadow: 0 0 10px color-mix(in srgb, #4f8ef7 55%, transparent);
+  }
+  .head-right {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  /* Scrolls when content exceeds the window; header/footer stay pinned. */
   .body {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
+    scrollbar-width: none;
+  }
+  .body::-webkit-scrollbar {
+    display: none;
   }
   footer {
     flex: 0 0 auto;
-  }
-  .app-name {
-    font-weight: 700;
-    letter-spacing: 0.02em;
-  }
-  .head-right {
+    margin-top: auto;
     display: flex;
-    align-items: center;
-    gap: 8px;
   }
-  /* Update banner — pinned under the header, above the scrolling body. */
+
+  /* ---------- Update banner ---------- */
   .update-banner {
     flex: 0 0 auto;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     font-weight: 600;
     text-align: center;
-    padding: 0.45rem 0.6rem;
-    border-radius: 8px;
-    border: 1px solid color-mix(in srgb, #4f8ef7 55%, transparent);
-    background: color-mix(in srgb, #4f8ef7 16%, transparent);
+    padding: 0.5rem 0.7rem;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, #4f8ef7 40%, transparent);
+    background: color-mix(in srgb, #4f8ef7 14%, transparent);
     color: inherit;
     cursor: pointer;
   }
   .update-banner:hover {
-    background: color-mix(in srgb, #4f8ef7 26%, transparent);
+    background: color-mix(in srgb, #4f8ef7 24%, transparent);
   }
-  /* Card identity zone: name (left) + sparkline & big token figure (right),
-     then the account on its own full-width line so the email isn't boxed
-     into the left half and truncated. */
+
+  /* ---------- Provider card ---------- */
+  .source {
+    position: relative;
+    border-radius: 18px;
+    padding: 0.85rem 0.95rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    /* Glass: a soft wash of the provider colour bleeding from the top-left,
+       over a faint neutral fill; hairline border tinted the same. */
+    background:
+      radial-gradient(
+        90% 60% at 0% 0%,
+        color-mix(in srgb, var(--accent, #8a8983) 16%, transparent),
+        transparent 70%
+      ),
+      color-mix(in srgb, currentColor 4.5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #8a8983) 26%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent),
+      0 10px 30px -18px color-mix(in srgb, var(--accent, #8a8983) 45%, transparent);
+  }
+
+  /* Identity zone: name (left) · hero number + trend band (right). */
   .head {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
+  }
+  .name {
+    font-weight: 700;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    padding-top: 0.15rem;
+  }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--accent, #8a8983);
+    display: inline-block;
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--accent, #8a8983) 20%, transparent),
+      0 0 12px color-mix(in srgb, var(--accent, #8a8983) 60%, transparent);
   }
   .headline {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 2px;
+    gap: 1px;
     flex: 0 0 auto;
+  }
+  .tokens {
+    font-variant-numeric: tabular-nums;
+    font-weight: 800;
+    font-size: 1.75rem;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.25em;
+  }
+  .unit {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    opacity: 0.5;
   }
   .acct {
     display: flex;
@@ -512,48 +602,235 @@
     gap: 6px;
     min-width: 0;
     width: 100%;
-    margin-top: -2px;
+    margin-top: -0.35rem;
   }
   .email {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-    opacity: 0.6;
-    font-size: 0.76rem;
+    opacity: 0.55;
+    font-size: 0.74rem;
   }
   .plan {
     flex: 0 0 auto;
-    font-size: 0.66rem;
-    font-weight: 600;
-    padding: 1px 7px;
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 1px 8px;
     border-radius: 999px;
-    background: rgba(128, 128, 128, 0.16);
+    color: var(--accent, #8a8983);
+    background: color-mix(in srgb, var(--accent, #8a8983) 14%, transparent);
     white-space: nowrap;
-    opacity: 0.9;
   }
-  .scope {
-    font: inherit;
-    font-size: 11.5px;
-    padding: 2px 6px;
-    border-radius: 7px;
-    border: 1px solid rgba(128, 128, 128, 0.35);
-    background: rgba(128, 128, 128, 0.12);
-    color: inherit;
-    max-width: 150px;
-    cursor: pointer;
+
+  /* Economics: three stat tiles, then the cost line. */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
   }
-  .devices {
-    border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
-    border-radius: 10px;
-    padding: 0.5rem 0.7rem;
+  .tile {
     display: flex;
     flex-direction: column;
+    gap: 2px;
+    padding: 0.42rem 0.6rem;
+    border-radius: 11px;
+    background: color-mix(in srgb, currentColor 6%, transparent);
+    min-width: 0;
+  }
+  .tile-k {
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    opacity: 0.5;
+  }
+  .tile-v {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 0.86rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cost {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.76rem;
+    padding: 0 0.15rem;
+  }
+  .cost-k {
+    opacity: 0.55;
+  }
+  .cost-v {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    margin-right: auto;
+  }
+  .saved {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #22a559;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, #22a559 14%, transparent);
+    white-space: nowrap;
+  }
+
+  /* Limits: pill badge + glowing gauges. */
+  .limits {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .lim-head {
+    display: block;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
     gap: 5px;
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 9%, transparent);
+    opacity: 0.85;
+  }
+  .badge.live {
+    color: #22a559;
+    background: color-mix(in srgb, #22a559 14%, transparent);
+    opacity: 1;
+  }
+  .badge.live::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 6px currentColor;
+    animation: pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .badge.live::before { animation: none; }
+  }
+  .badge.warn {
+    color: #d98324;
+    background: color-mix(in srgb, #d98324 14%, transparent);
+    opacity: 1;
+  }
+  .est,
+  .login-hint {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    line-height: 1.5;
+  }
+  .usage {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    width: 100%;
+    margin-top: 2px;
+  }
+  .uwin {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .uwin-label {
+    flex: 0 0 auto;
+    min-width: 3.4em;
+    font-size: 0.76rem;
+    font-weight: 600;
+    opacity: 0.8;
+  }
+  .meter {
+    flex: 1 1 60px;
+    height: 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    overflow: hidden;
+  }
+  .meter .fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(
+      90deg,
+      var(--accent, #4f8ef7),
+      color-mix(in srgb, var(--accent, #4f8ef7) 55%, #ffffff)
+    );
+    box-shadow: 0 0 10px color-mix(in srgb, var(--accent, #4f8ef7) 55%, transparent);
+    transition: width 0.4s ease;
+  }
+  .uwin-meta {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  .uwin-pct {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  .reset {
+    font-size: 0.68rem;
+    opacity: 0.5;
+  }
+  /* Usage emphasis: amber ≥70%, red ≥90% — the gauge and the number agree. */
+  .uwin.warn .fill {
+    background: linear-gradient(90deg, #e0a83a, #f2c866);
+    box-shadow: 0 0 10px color-mix(in srgb, #e0a83a 55%, transparent);
+  }
+  .uwin.crit .fill {
+    background: linear-gradient(90deg, #e0524f, #ff8a7a);
+    box-shadow: 0 0 10px color-mix(in srgb, #e0524f 60%, transparent);
+  }
+  .uwin.warn .uwin-pct { color: #e0a83a; }
+  .uwin.crit .uwin-pct { color: #e0524f; }
+
+  .login-needed {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    font-size: 0.78rem;
+    flex-wrap: wrap;
+  }
+  .login-needed code {
+    font-size: 0.72rem;
+    padding: 0.1em 0.45em;
+    border-radius: 6px;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+
+  /* ---------- Devices (전체 view) ---------- */
+  .devices {
+    border-radius: 14px;
+    padding: 0.6rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: color-mix(in srgb, currentColor 4.5%, transparent);
+    border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
   }
   .dev-title {
-    font-size: 11.5px;
-    font-weight: 600;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
   .dev-row {
     display: flex;
@@ -565,78 +842,23 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: 0.82rem;
   }
   .dev-tok {
     font-variant-numeric: tabular-nums;
-    font-weight: 600;
+    font-weight: 700;
+    font-size: 0.82rem;
   }
   .dev-when {
     flex: 0 0 auto;
   }
-  .source {
-    /* Distinct panel per provider: subtle fill + stronger border + a colored
-       left accent (Claude orange / Codex blue) so each region reads clearly. */
-    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
-    border-left: 3px solid var(--accent, #8a8983);
-    border-radius: 10px;
-    padding: 0.6rem 0.75rem;
-    background: color-mix(in srgb, currentColor 5%, transparent);
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
+
+  /* ---------- Misc ---------- */
   .row {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 0.5rem;
-  }
-  .name {
-    font-weight: 600;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4em;
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 3px;
-    background: var(--accent, #8a8983);
-    display: inline-block;
-  }
-  .tokens {
-    font-variant-numeric: tabular-nums;
-    font-weight: 700;
-    font-size: 1.15rem;
-    line-height: 1;
-    white-space: nowrap;
-  }
-  .unit {
-    font-size: 0.72rem;
-    font-weight: 600;
-    opacity: 0.6;
-  }
-  /* Economics zone — usage detail (left) + cost/savings (right), divided
-     from the identity zone above. */
-  .stats {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 8px;
-    padding-top: 0.5rem;
-    border-top: 1px solid rgba(128, 128, 128, 0.16);
-  }
-  .io {
-    font-size: 0.76rem;
-  }
-  /* Limits zone — badge + usage bars, divided from economics. */
-  .limits {
-    padding-top: 0.5rem;
-    border-top: 1px solid rgba(128, 128, 128, 0.16);
-  }
-  .lim-head {
-    display: block;
-    margin-bottom: 6px;
   }
   .warn {
     color: #c47912;
@@ -644,26 +866,8 @@
     font-size: 0.85rem;
   }
   .muted {
-    opacity: 0.65;
+    opacity: 0.6;
     font-size: 0.8rem;
-  }
-  .cost {
-    display: inline-flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 2px;
-    font-size: 0.76rem;
-    opacity: 0.9;
-    flex: 0 0 auto;
-    text-align: right;
-  }
-  .cost-main {
-    white-space: nowrap;
-  }
-  .saved {
-    color: #008300;
-    font-size: 0.72rem;
-    font-weight: 600;
   }
   .small {
     font-size: 0.72rem;
@@ -671,95 +875,24 @@
   .center {
     text-align: center;
   }
-  .badge {
-    border: 1px solid currentColor;
-    border-radius: 4px;
-    padding: 0 0.25em;
-    font-size: 0.7rem;
-    font-weight: 600;
+  .scope {
+    font: inherit;
+    font-size: 11.5px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    background: color-mix(in srgb, currentColor 6%, transparent);
+    color: inherit;
+    max-width: 150px;
+    cursor: pointer;
+    margin-right: 4px;
   }
-  .badge.warn {
-    color: #d98324;
-    border-color: currentColor;
-  }
-  .login-needed {
-    display: flex;
-    align-items: center;
-    gap: 0.4em;
-    font-size: 0.8rem;
-    flex-wrap: wrap;
-  }
-  .login-needed code {
-    font-size: 0.75rem;
-    padding: 0.05em 0.35em;
-    border-radius: 4px;
-    background: rgba(128, 128, 128, 0.18);
-  }
-  .login-hint {
-    display: block;
-    margin-top: 0.3em;
-  }
-  .meter {
-    flex: 0 0 56px;
-    height: 6px;
-    border-radius: 3px;
-    background: rgba(128, 128, 128, 0.25);
-    overflow: hidden;
-  }
-  .meter .fill {
-    display: block;
-    height: 100%;
-    background: #4f8ef7;
-  }
-  .usage {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    width: 100%;
-    margin-top: 2px;
-  }
-  .uwin {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    row-gap: 3px;
-    flex-wrap: wrap;
-  }
-  .uwin .meter {
-    flex: 1 1 60px;
-  }
-  .uwin-label {
-    flex: 0 0 auto;
-    min-width: 3.2em;
-    font-size: 0.78rem;
-  }
-  .uwin-pct {
-    flex: 0 0 auto;
-    font-variant-numeric: tabular-nums;
-    font-size: 0.78rem;
-  }
-  .uwin .reset {
-    flex-basis: 100%;
-  }
-  /* Usage-rate emphasis: amber ≥70%, red ≥90%. */
-  .uwin.warn .fill {
-    background: #e0a83a;
-  }
-  .uwin.crit .fill {
-    background: #e0524f;
-  }
-  .uwin.crit .uwin-pct {
-    color: #e0524f;
-    font-weight: 700;
-  }
-  footer {
-    margin-top: auto;
-    display: flex;
-  }
+
+  /* ---------- Buttons ---------- */
   button {
     font: inherit;
-    border-radius: 8px;
-    border: 1px solid rgba(128, 128, 128, 0.35);
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
     background: transparent;
     color: inherit;
     cursor: pointer;
@@ -767,17 +900,41 @@
   }
   button.primary {
     flex: 1;
-    background: #4f8ef7;
-    border-color: #4f8ef7;
-    color: white;
-    font-weight: 600;
+    border: none;
+    border-radius: 13px;
+    padding: 0.62rem 0.8rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: #fff;
+    background: linear-gradient(135deg, #4f8ef7, #6a5cf5);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      0 10px 22px -10px rgba(79, 142, 247, 0.75);
+    transition: transform 0.12s ease, filter 0.12s ease;
+  }
+  button.primary:hover {
+    filter: brightness(1.06);
+  }
+  button.primary:active {
+    transform: translateY(1px);
   }
   button.ghost {
     border: none;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 50%;
     font-size: 1rem;
-    padding: 0.1rem 0.4rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.75;
+  }
+  button.ghost:hover {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 9%, transparent);
   }
   button:disabled {
-    opacity: 0.5;
+    opacity: 0.45;
   }
 </style>
