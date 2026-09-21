@@ -1,6 +1,6 @@
 {
   "name": "meterly",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "macOS menu bar app for local AI CLI usage tracking",
   "private": true,
   "type": "module",
