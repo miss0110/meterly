@@ -4,5 +4,6 @@
   "identifier": "com.meterly.dev",
   "bundle": {
     "createUpdaterArtifacts": false
-  }
+  },
+  "mainBinaryName": "meterly-dev"
 }

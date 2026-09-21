@@ -294,6 +294,13 @@ pub(crate) fn check_updates(handle: AppHandle, manual: bool) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin. A second launch (Spotlight, Dock, Finder)
+        // hands off to the running instance and just toggles its popover.
+        // Two live instances of the same bundle id fight over one status-item
+        // slot and thrash the shared cache — the 2026-09 "tray vanished" case.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            toggle_popover(app);
+        }))
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
