@@ -32,3 +32,9 @@ notify = "6"
 base64 = "0.22"
 # Org usage reporting (already in the tree via tauri-plugin-updater).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+
+[features]
+# Development build: "meterly Dev" — separate bundle id, cache and log dirs,
+# DEV marker in the tray tooltip/log, and no self-update. Build with
+# `npm run build:dev-app` (tauri.dev.conf.json overlays productName/identifier).
+dev = []

@@ -20,6 +20,19 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_positioner::{Position, WindowExt};
 
+/// Build flavor. The `dev` Cargo feature (see `npm run build:dev-app`) produces
+/// "meterly Dev": its own bundle id (tauri.dev.conf.json), data and log dirs,
+/// a DEV marker in the tray tooltip and log, and no self-update — so a test
+/// build can run beside the installed app without sharing its cache or
+/// showing up as a second "meterly" in Spotlight.
+pub const IS_DEV_BUILD: bool = cfg!(feature = "dev");
+/// Human label for logs/tooltips.
+pub const APP_LABEL: &str = if IS_DEV_BUILD { "meterly Dev" } else { "meterly" };
+/// Folder under the platform data dir holding the cache (see cache.rs).
+pub const DATA_DIR_NAME: &str = if IS_DEV_BUILD { "com.meterly.dev" } else { "com.meterly.app" };
+/// Folder name for daily logs (see logging.rs).
+pub const LOG_DIR_NAME: &str = if IS_DEV_BUILD { "meterly-dev" } else { "meterly" };
+
 /// Latest known available update version (e.g. "0.1.14"), set by the periodic
 /// scan. `None` = up to date (or not checked yet). Drives the popover banner.
 pub struct UpdateState(pub std::sync::Mutex<Option<String>>);
@@ -34,6 +47,11 @@ const UPDATE_SCAN_INTERVAL_SECS: u64 = 6 * 3600;
 fn update_scan(handle: &AppHandle) {
     use tauri_plugin_notification::NotificationExt;
     use tauri_plugin_updater::UpdaterExt;
+
+    // A dev build must never offer to replace itself with the public release.
+    if IS_DEV_BUILD {
+        return;
+    }
 
     let found: Option<String> = if let Ok(v) = std::env::var("METERLY_FAKE_UPDATE") {
         Some(v)
@@ -332,7 +350,8 @@ pub fn run() {
             // Local daily logs (last week kept) for field diagnosis.
             crate::logging::prune();
             crate::logging::info(&format!(
-                "meterly {} starting ({})",
+                "{} {} starting ({})",
+                APP_LABEL,
                 app.package_info().version,
                 std::env::consts::OS
             ));

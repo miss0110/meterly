@@ -1330,8 +1330,8 @@ fn apply_tray_title_on_main(app: &AppHandle, title: Option<String>) {
         return;
     };
     let tooltip = match &title {
-        Some(t) => format!("meterly — 오늘 {t}"),
-        None => "meterly".to_string(),
+        Some(t) => format!("{} — 오늘 {t}", crate::APP_LABEL),
+        None => crate::APP_LABEL.to_string(),
     };
 
     // macOS: render the value as a FIXED-size template image instead of a text
@@ -1358,7 +1358,9 @@ fn apply_tray_title_on_main(app: &AppHandle, title: Option<String>) {
                 let _ = tray.set_icon_as_template(false);
             }
         }
-        let _ = tray.set_title(None::<&str>);
+        // `None` leaves the "–" placeholder title in place on macOS Tahoe (the
+        // status button keeps its last string); an empty string really clears it.
+        let _ = tray.set_title(Some(""));
         let _ = tray.set_tooltip(Some(tooltip));
     }
 
@@ -1475,6 +1477,22 @@ fn publish_tray_and_emit(app: &AppHandle, summary: &Summary) {
 /// the engine lock, POST without it, mark last_org_report on success. Returns
 /// the number of rows sent. Also used by the Settings "지금 전송" button.
 pub fn send_org_report(app: &AppHandle) -> Result<usize, String> {
+    // One report at a time. The due check in `org_report_tick` runs outside
+    // the engine lock, so a burst of refreshes at startup (initial scan + file
+    // watcher) each saw "due" and posted the same snapshot three times
+    // (2026-09-21 log). Later callers simply skip; the tick retries next cycle.
+    static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    if IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("이미 전송 중입니다".into());
+    }
+    let _reset = Reset;
+
     let state = app.state::<AppState>();
     let (cfg, batch) = {
         let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());

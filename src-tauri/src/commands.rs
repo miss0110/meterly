@@ -112,7 +112,11 @@ pub fn get_settings(app: AppHandle, state: State<'_, AppState>) -> SettingsData 
     use tauri_plugin_autostart::ManagerExt;
     let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     SettingsData {
-        version: app.package_info().version.to_string(),
+        version: if crate::IS_DEV_BUILD {
+            format!("{} (dev)", app.package_info().version)
+        } else {
+            app.package_info().version.to_string()
+        },
         tray_display: engine.cache.tray_display.clone().unwrap_or_default(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         sync_dir: engine.cache.sync_dir.clone(),

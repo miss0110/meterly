@@ -134,7 +134,7 @@ pub struct CacheV1 {
 pub fn cache_path() -> PathBuf {
     let dir = std::env::var_os("METERLY_CACHE_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::data_dir().map(|d| d.join("com.meterly.app")))
+        .or_else(|| dirs::data_dir().map(|d| d.join(crate::DATA_DIR_NAME)))
         .unwrap_or_else(|| PathBuf::from(".meterly"));
     dir.join("cache-v1.json")
 }

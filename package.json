@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:dev-app": "tauri build --config src-tauri/tauri.dev.conf.json --features dev --bundles app"
   },
   "license": "MIT",
   "dependencies": {

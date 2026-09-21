@@ -31,10 +31,10 @@ pub fn log_dir() -> PathBuf {
     }
     #[cfg(target_os = "macos")]
     if let Some(home) = dirs::home_dir() {
-        return home.join("Library").join("Logs").join("meterly");
+        return home.join("Library").join("Logs").join(crate::LOG_DIR_NAME);
     }
     dirs::data_dir()
-        .map(|d| d.join("meterly").join("logs"))
+        .map(|d| d.join(crate::LOG_DIR_NAME).join("logs"))
         .unwrap_or_else(|| PathBuf::from(".meterly-logs"))
 }
 
