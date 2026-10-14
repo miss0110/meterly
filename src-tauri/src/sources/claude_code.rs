@@ -62,6 +62,10 @@ struct RepoResolver {
     prefixes: Vec<String>,
     /// A git root equal to one of these is not a "project" (dotfile repos).
     excluded_roots: Vec<PathBuf>,
+    /// Home dir as text, for expanding `~/`, `$HOME/`, `${HOME}/` in commands
+    /// (`cd ~/project/x` is the common form — missing it mis-billed whole
+    /// sessions to whatever absolute path happened to sit on the same line).
+    home: Option<String>,
     /// directory → repo name (None = not inside a repo). Memoized across
     /// scans: a full re-parse runs on every log write, `.git` probes must not.
     cache: HashMap<PathBuf, Option<String>>,
@@ -78,6 +82,9 @@ impl RepoResolver {
             .collect();
         Self {
             prefixes,
+            home: home
+                .as_ref()
+                .map(|h| h.to_string_lossy().trim_end_matches(['/', '\\']).to_string()),
             excluded_roots: home.into_iter().collect(),
             cache: HashMap::new(),
         }
@@ -87,6 +94,7 @@ impl RepoResolver {
     fn with_prefix(prefix: &Path) -> Self {
         Self {
             prefixes: vec![prefix.to_string_lossy().into_owned()],
+            home: Some(prefix.to_string_lossy().into_owned()),
             excluded_roots: vec![prefix.to_path_buf()],
             cache: HashMap::new(),
         }
@@ -129,7 +137,11 @@ impl RepoResolver {
         let mut counts: Vec<(String, usize)> = Vec::new();
         let paths: Vec<String> = texts
             .iter()
-            .flat_map(|t| extract_paths(t, &self.prefixes))
+            .map(|t| expand_home(t, self.home.as_deref()))
+            .flat_map(|t| extract_paths(&t, &self.prefixes))
+            // A dependency inside another repo (`…/argus/web/node_modules/
+            // playwright`) is a tool being borrowed, not work on that repo.
+            .filter(|p| !p.contains("/node_modules/") && !p.ends_with("/node_modules"))
             .collect();
         for path in paths {
             if let Some(repo) = self.repo_of_path(Path::new(&path)) {
@@ -170,6 +182,35 @@ impl RepoResolver {
         }
         found
     }
+}
+
+/// `~/x`, `$HOME/x`, `${HOME}/x` → `<home>/x` where they start a word.
+fn expand_home(text: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return text.to_string();
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    'outer: while !rest.is_empty() {
+        let at_word_start = !matches!(prev, Some(c) if c.is_alphanumeric() || c == '/' || c == '.' || c == '-' || c == '_');
+        if at_word_start {
+            for token in ["~/", "$HOME/", "${HOME}/"] {
+                if rest.starts_with(token) {
+                    out.push_str(home);
+                    out.push('/');
+                    rest = &rest[token.len()..];
+                    prev = Some('/');
+                    continue 'outer;
+                }
+            }
+        }
+        let c = rest.chars().next().expect("non-empty");
+        out.push(c);
+        prev = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 /// Every string leaf of a JSON value (tool inputs nest: MultiEdit, Agent…).
@@ -593,6 +634,20 @@ mod tests {
         let mut v: Vec<_> = by.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
         println!("events={} scan1={first:?} scan2(cached)={second:?}", events.len());
+        // Yesterday's sessions, split by project (dashboard "어제" check).
+        let yday = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+        let mut sess: HashMap<String, HashMap<String, u64>> = HashMap::new();
+        for e in events.iter().filter(|e| e.timestamp.with_timezone(&chrono::Local).date_naive() == yday) {
+            *sess.entry(e.session_id[..8].to_string()).or_default()
+                .entry(e.project.clone().unwrap_or_default()).or_default() += e.total_tokens();
+        }
+        for (sid, split) in &sess {
+            let mut v: Vec<_> = split.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            let total: u64 = v.iter().map(|x| *x.1).sum();
+            println!("  {yday} {sid} {:.0}M {:?}", total as f64 / 1e6,
+                v.iter().map(|(p, t)| format!("{p} {:.0}M", **t as f64 / 1e6)).collect::<Vec<_>>());
+        }
         for (p, t) in v.iter().take(15) {
             println!("  {p:28} {:.2}B", *t as f64 / 1e9);
         }
@@ -628,6 +683,23 @@ mod tests {
         // Inside a longer path (or a slugged dir name) is not a match.
         assert!(extract_paths("/x/h/u/proj", &["/h/u".to_string()]).is_empty());
         assert!(extract_paths("/tmp/-h/u-proj", &["/h/u".to_string()]).is_empty());
+    }
+
+    /// `cd ~/proj/x && … /abs/other/node_modules/lib` → x (tilde expanded,
+    /// borrowed dependency ignored). The argus/goat-keeper case from 2026-10-13.
+    #[test]
+    fn tilde_paths_count_and_node_modules_do_not() {
+        let base = temp_root("repo-tilde");
+        for repo in ["keeper", "argus"] {
+            fs::create_dir_all(base.join(repo).join(".git")).unwrap();
+        }
+        let b = base.to_string_lossy().into_owned();
+        let mut r = RepoResolver::with_prefix(&base);
+        let cmd = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"cd ~/keeper && PLAYWRIGHT_MODULE={b}/argus/web/node_modules/playwright/index.mjs node x.mjs"}}}}]}}}}"#
+        );
+        assert_eq!(r.repo_of_line(&cmd).as_deref(), Some("keeper"));
+        assert_eq!(expand_home("cd ~/a; ls $HOME/b ${HOME}/c x~/d", Some("/H")), "cd /H/a; ls /H/b /H/c x~/d");
     }
 
     /// The record's own `cwd` (on every line) must not count as a tool path.

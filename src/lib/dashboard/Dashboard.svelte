@@ -450,9 +450,14 @@
         {#each sessions as s, i (s.source + s.session_id)}
           <div class="sess-row" style={`--accent:${t.sources[s.source] ?? "#8a8983"}`}>
             <span class="rank">{i + 1}</span>
-            <span class="r-name" title={s.project ?? "프로젝트 미기록"}>
+            <span
+              class="r-name"
+              title={s.project_count > 1
+                ? `${s.project_count}개 저장소에서 작업 — 토큰이 가장 많은 저장소 표시`
+                : (s.project ?? "프로젝트 미기록")}
+            >
               <span class="src-dot" title={SOURCE_LABELS[s.source]}></span>
-              {s.project ?? "(미분류)"}
+              {s.project ?? "(미분류)"}{#if s.project_count > 1}<span class="plus">+{s.project_count - 1}</span>{/if}
             </span>
             <span class="r-name mono" title={s.model_count > 1 ? `${s.model_count}개 모델 사용 — 가장 많이 쓴 모델 표시` : ""}>
               {s.model ?? "unknown"}{#if s.model_count > 1}<span class="plus">+{s.model_count - 1}</span>{/if}

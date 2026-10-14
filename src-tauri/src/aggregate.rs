@@ -205,7 +205,8 @@ impl SessionBucket {
 }
 
 /// Fold events into per-session buckets (local date), dropping events before
-/// `window_start`. A session's project is the first one seen.
+/// `window_start`. Keyed on the project too: one session can move between
+/// repos, and the dashboard names a session after the repo it spent most in.
 pub fn ingest_sessions(
     buckets: &mut Vec<SessionBucket>,
     events: &[UsageEvent],
@@ -221,6 +222,7 @@ pub fn ingest_sessions(
                 && b.source == ev.source
                 && b.session_id == ev.session_id
                 && b.model == ev.model
+                && b.project == ev.project
         });
         let b = match found {
             Some(b) => b,
@@ -250,9 +252,6 @@ pub fn ingest_sessions(
         }
         if ev.timestamp > b.last_at {
             b.last_at = ev.timestamp;
-        }
-        if b.project.is_none() {
-            b.project = ev.project.clone();
         }
     }
 }

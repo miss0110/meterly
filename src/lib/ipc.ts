@@ -166,6 +166,8 @@ export interface SessionUsage {
   model: string | null;
   /** Distinct models used (>1 = main + subagent slices). */
   model_count: number;
+  /** Distinct repos worked in; `project` is the one with the most tokens. */
+  project_count: number;
   tokens: TokenBreakdown;
   cost_usd: number | null;
   first_at: string;

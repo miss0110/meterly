@@ -937,6 +937,9 @@ pub struct SessionUsage {
     pub model: Option<String>,
     /// Distinct models used (>1 = main + subagent/haiku slices).
     pub model_count: usize,
+    /// Distinct projects (repos) the session worked in; `project` is the one
+    /// with the most tokens.
+    pub project_count: usize,
     pub tokens: TokenBreakdown,
     pub cost_usd: Option<f64>,
     pub first_at: chrono::DateTime<Utc>,
@@ -983,7 +986,9 @@ impl Engine {
     /// API-equivalent cost, unpriced sessions by tokens after the priced ones.
     pub fn sessions(&self, date: NaiveDate, limit: usize) -> Vec<SessionUsage> {
         let mut by_session: HashMap<(SourceId, String), SessionUsage> = HashMap::new();
-        let mut main_slice: HashMap<(SourceId, String), u64> = HashMap::new();
+        // Per session: tokens by model and by project → the dominant of each.
+        type Split = HashMap<Option<String>, u64>;
+        let mut splits: HashMap<(SourceId, String), (Split, Split)> = HashMap::new();
         for b in self
             .cache
             .sessions_claude
@@ -995,9 +1000,10 @@ impl Engine {
             let su = by_session.entry(key.clone()).or_insert_with(|| SessionUsage {
                 session_id: b.session_id.clone(),
                 source: b.source,
-                project: b.project.clone(),
+                project: None,
                 model: None,
                 model_count: 0,
+                project_count: 0,
                 tokens: TokenBreakdown {
                     input: 0,
                     output: 0,
@@ -1014,19 +1020,27 @@ impl Engine {
             su.tokens.cache_read += b.cache_read;
             su.tokens.cache_creation += b.cache_creation;
             su.tokens.total += b.total();
-            su.model_count += 1;
             if let Some(c) = b.cost_usd() {
                 *su.cost_usd.get_or_insert(0.0) += c;
             }
-            if su.project.is_none() {
-                su.project = b.project.clone();
-            }
             su.first_at = su.first_at.min(b.first_at);
             su.last_at = su.last_at.max(b.last_at);
-            let best = main_slice.entry(key).or_insert(0);
-            if b.total() >= *best {
-                *best = b.total();
-                su.model = b.model.clone();
+            let (models, projects) = splits.entry(key).or_default();
+            *models.entry(b.model.clone()).or_default() += b.total();
+            *projects.entry(b.project.clone()).or_default() += b.total();
+        }
+        let dominant = |m: &Split| {
+            m.iter()
+                .filter(|(k, _)| k.is_some())
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                .and_then(|(k, _)| k.clone())
+        };
+        for (key, su) in by_session.iter_mut() {
+            if let Some((models, projects)) = splits.get(key) {
+                su.model = dominant(models);
+                su.model_count = models.len();
+                su.project = dominant(projects);
+                su.project_count = projects.keys().filter(|k| k.is_some()).count();
             }
         }
         let mut out: Vec<SessionUsage> = by_session.into_values().collect();
