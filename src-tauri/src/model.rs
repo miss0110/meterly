@@ -40,8 +40,10 @@ pub struct UsageEvent {
     pub dedup_key: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub model: Option<String>,
-    /// Project the work happened in — the basename of the session's `cwd`
-    /// (never a full path). `None` when the log carried no cwd. Drives the
+    /// Project the work happened in — a folder NAME, never a full path.
+    /// Claude Code: the git repo this turn's tool calls touched (falls back to
+    /// the session `cwd` basename when it never touches a repo). Codex: the
+    /// session `cwd` basename. `None` when neither is known. Drives the
     /// dashboard's per-project breakdown.
     pub project: Option<String>,
     /// Non-cached input tokens only.

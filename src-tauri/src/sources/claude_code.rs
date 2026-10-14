@@ -30,6 +30,9 @@ pub struct ClaudeCodeSource {
     root: PathBuf,
     /// Health of the most recent `scan` (Ok before the first scan).
     last_health: SourceHealth,
+    /// Repo attribution (see [`RepoResolver`]): which git repository each
+    /// turn actually worked in, instead of the directory Claude was started in.
+    repos: RepoResolver,
 }
 
 impl ClaudeCodeSource {
@@ -37,8 +40,176 @@ impl ClaudeCodeSource {
         Self {
             root,
             last_health: SourceHealth::Ok,
+            repos: RepoResolver::for_home(),
         }
     }
+}
+
+/// Attributes Claude Code usage to the git repository a turn actually touched.
+///
+/// A session's `cwd` is only where Claude was launched; people routinely start
+/// in one folder and work across several repos (one user's "claude-admin" held
+/// 5.7B tokens, 93% of it spent in other repos). So each tool call's absolute
+/// paths (Read/Edit/Write `file_path`, Grep/Glob `path`, `cd …` in Bash) are
+/// mapped to their enclosing git root, and usage is billed to the repo of the
+/// most recent such call. Paths outside any repo (scratch dirs, ~/Library) are
+/// ignored; a session that never touches a repo keeps its `cwd` basename.
+///
+/// Only the repo's folder NAME is used, like before — never a path.
+struct RepoResolver {
+    /// Absolute-path prefixes looked for in tool calls (the home dir).
+    /// Narrowing to home keeps system paths out.
+    prefixes: Vec<String>,
+    /// A git root equal to one of these is not a "project" (dotfile repos).
+    excluded_roots: Vec<PathBuf>,
+    /// directory → repo name (None = not inside a repo). Memoized across
+    /// scans: a full re-parse runs on every log write, `.git` probes must not.
+    cache: HashMap<PathBuf, Option<String>>,
+}
+
+impl RepoResolver {
+    fn for_home() -> Self {
+        let home = dirs::home_dir();
+        let prefixes = home
+            .as_ref()
+            .map(|h| h.to_string_lossy().trim_end_matches(['/', '\\']).to_string())
+            .filter(|p| !p.is_empty())
+            .into_iter()
+            .collect();
+        Self {
+            prefixes,
+            excluded_roots: home.into_iter().collect(),
+            cache: HashMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_prefix(prefix: &Path) -> Self {
+        Self {
+            prefixes: vec![prefix.to_string_lossy().into_owned()],
+            excluded_roots: vec![prefix.to_path_buf()],
+            cache: HashMap::new(),
+        }
+    }
+
+    /// The repo a tool-call line touched, or None. With several repos on one
+    /// line (a Bash command spanning two), the most mentioned wins, ties → first.
+    ///
+    /// Only the tool calls' `input` values are read — never the rest of the
+    /// record, whose `cwd` field names the launch folder on every line.
+    fn repo_of_line(&mut self, line: &str) -> Option<String> {
+        if !line.contains("\"tool_use\"") {
+            return None;
+        }
+        #[derive(Deserialize)]
+        struct Rec {
+            message: Option<Msg>,
+        }
+        #[derive(Deserialize)]
+        struct Msg {
+            #[serde(default)]
+            content: Vec<Block>,
+        }
+        #[derive(Deserialize)]
+        struct Block {
+            #[serde(rename = "type")]
+            kind: Option<String>,
+            input: Option<serde_json::Value>,
+        }
+        // `content` can also be a plain string on some records → no tools.
+        let rec: Rec = serde_json::from_str(line).ok()?;
+        let mut texts: Vec<String> = Vec::new();
+        for block in rec.message?.content {
+            if block.kind.as_deref() == Some("tool_use") {
+                if let Some(input) = block.input {
+                    collect_strings(&input, &mut texts);
+                }
+            }
+        }
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        let paths: Vec<String> = texts
+            .iter()
+            .flat_map(|t| extract_paths(t, &self.prefixes))
+            .collect();
+        for path in paths {
+            if let Some(repo) = self.repo_of_path(Path::new(&path)) {
+                match counts.iter_mut().find(|(r, _)| *r == repo) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((repo, 1)),
+                }
+            }
+        }
+        let max = counts.iter().map(|(_, n)| *n).max()?;
+        counts.into_iter().find(|(_, n)| *n == max).map(|(r, _)| r)
+    }
+
+    /// Nearest ancestor holding `.git` (dir, or file for worktrees/submodules).
+    /// The path itself need not exist any more.
+    fn repo_of_path(&mut self, path: &Path) -> Option<String> {
+        if self.cache.len() > 50_000 {
+            self.cache.clear(); // bound memory on pathological corpora
+        }
+        let mut visited: Vec<PathBuf> = Vec::new();
+        let mut found: Option<String> = None;
+        for dir in path.ancestors() {
+            if let Some(hit) = self.cache.get(dir) {
+                found = hit.clone();
+                break;
+            }
+            if self.excluded_roots.iter().any(|r| r == dir) || dir.parent().is_none() {
+                break;
+            }
+            visited.push(dir.to_path_buf());
+            if dir.join(".git").exists() {
+                found = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+                break;
+            }
+        }
+        for dir in visited {
+            self.cache.insert(dir, found.clone());
+        }
+        found
+    }
+}
+
+/// Every string leaf of a JSON value (tool inputs nest: MultiEdit, Agent…).
+fn collect_strings(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s) => out.push(s.clone()),
+        serde_json::Value::Array(a) => a.iter().for_each(|x| collect_strings(x, out)),
+        serde_json::Value::Object(o) => o.values().for_each(|x| collect_strings(x, out)),
+        _ => {}
+    }
+}
+
+/// Absolute paths under any of `prefixes` inside a (decoded) tool-input
+/// string. A path ends at a shell delimiter; spaces end it too, which only
+/// costs the tail — the `.git` walk goes upward anyway.
+fn extract_paths(text: &str, prefixes: &[String]) -> Vec<String> {
+    const DELIMS: &[char] = &['"', '\'', ' ', '\t', '\n', '\r', ',', ';', ')', '(', '<', '>', '|', '&', '`', '*', '{', '}', '[', ']', '='];
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        for (idx, _) in text.match_indices(prefix.as_str()) {
+            // Must start a path (not sit inside a longer one).
+            let before = text[..idx].chars().next_back();
+            if matches!(before, Some(c) if c.is_alphanumeric() || c == '/' || c == '.' || c == '-') {
+                continue;
+            }
+            let rest = &text[idx..];
+            let end = rest
+                .char_indices()
+                // On unix a backslash is an escape (`a\ b`, line continuation),
+                // never part of the path.
+                .find(|&(_, c)| DELIMS.contains(&c) || (cfg!(not(windows)) && c == '\\'))
+                .map(|(i, _)| i)
+                .unwrap_or(rest.len());
+            let path = rest[..end].trim_end_matches(['/', '\\', ':', '.']).to_string();
+            if path.len() > prefix.len() {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 impl UsageSource for ClaudeCodeSource {
@@ -84,8 +255,22 @@ impl UsageSource for ClaudeCodeSource {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let project = file_project(&content);
-            for line in content.lines() {
+            // Project per turn: the repo of the most recent tool call (see
+            // RepoResolver). Turns before the first tool call take the first
+            // repo the session touches; no repo at all → the launch cwd.
+            let lines: Vec<&str> = content.lines().collect();
+            let touched: Vec<Option<String>> =
+                lines.iter().map(|l| self.repos.repo_of_line(l)).collect();
+            let mut project = touched
+                .iter()
+                .flatten()
+                .next()
+                .cloned()
+                .or_else(|| file_project(&content));
+            for (line, repo) in lines.into_iter().zip(touched) {
+                if repo.is_some() {
+                    project = repo;
+                }
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -330,6 +515,144 @@ mod tests {
         let mut source = ClaudeCodeSource::new(root);
         let outcome = source.scan(&SourceCursors::default());
         (source, outcome)
+    }
+
+    /// One assistant record with usage, optionally carrying a tool call that
+    /// touches `tool_path` (Edit `file_path`).
+    fn assistant_line(n: u32, cwd: &str, tool_path: Option<&str>) -> String {
+        let content = match tool_path {
+            Some(p) => format!(
+                r#"[{{"type":"tool_use","id":"t{n}","name":"Edit","input":{{"file_path":"{p}","old_string":"a","new_string":"b"}}}}]"#
+            ),
+            None => r#"[{"type":"text","text":"hi"}]"#.to_string(),
+        };
+        format!(
+            r#"{{"type":"assistant","cwd":"{cwd}","timestamp":"2026-07-13T01:0{n}:00Z","requestId":"r{n}","message":{{"id":"m{n}","model":"claude-opus-5","content":{content},"usage":{{"input_tokens":{n},"output_tokens":1}}}}}}"#
+        )
+    }
+
+    /// Repo attribution: turns follow the repo of the latest tool call; the
+    /// leading turn borrows the first repo; non-repo paths don't switch.
+    #[test]
+    fn usage_is_attributed_to_the_repo_each_turn_touched_not_the_launch_cwd() {
+        let base = temp_root("repo-attrib");
+        for repo in ["alpha", "beta"] {
+            fs::create_dir_all(base.join(repo).join(".git")).unwrap();
+            fs::create_dir_all(base.join(repo).join("src")).unwrap();
+        }
+        fs::create_dir_all(base.join("scratch")).unwrap(); // not a repo
+        let b = base.to_string_lossy();
+        let launch = format!("{b}/launcher");
+        let lines = [
+            assistant_line(1, &launch, None),                                   // before any tool → alpha (lookahead)
+            assistant_line(2, &launch, Some(&format!("{b}/alpha/src/x.rs"))), // alpha
+            assistant_line(3, &launch, None),                                   // stays alpha
+            assistant_line(4, &launch, Some(&format!("{b}/scratch/n.txt"))),  // non-repo → stays alpha
+            assistant_line(5, &launch, Some(&format!("{b}/beta/src/y.rs"))),  // beta
+            assistant_line(6, &launch, None),                                   // stays beta
+        ]
+        .join("\n");
+        let root = base.join("logs");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("s1.jsonl"), lines).unwrap();
+        let mut source = ClaudeCodeSource::new(root);
+        source.repos = RepoResolver::with_prefix(&base);
+        let mut events = source.scan(&SourceCursors::default()).events;
+        events.sort_by_key(|e| e.input_tokens);
+        let projects: Vec<_> = events.iter().map(|e| e.project.as_deref()).collect();
+        assert_eq!(
+            projects,
+            vec![Some("alpha"), Some("alpha"), Some("alpha"), Some("alpha"), Some("beta"), Some("beta")]
+        );
+    }
+
+    /// Live check against the real ~/.claude/projects: per-project totals and
+    /// scan time. `cargo test --lib live_claude_project_breakdown -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_claude_project_breakdown() {
+        let root = dirs::home_dir().unwrap().join(".claude/projects");
+        let mut source = ClaudeCodeSource::new(root);
+        let t = std::time::Instant::now();
+        let events = source.scan(&SourceCursors::default()).events;
+        let first = t.elapsed();
+        let t = std::time::Instant::now();
+        let _ = source.scan(&SourceCursors::default());
+        let second = t.elapsed();
+        // Baseline: same scan with repo attribution off (cwd-only, as before).
+        let mut plain = ClaudeCodeSource::new(dirs::home_dir().unwrap().join(".claude/projects"));
+        plain.repos.prefixes.clear();
+        let _ = plain.scan(&SourceCursors::default());
+        let t = std::time::Instant::now();
+        let _ = plain.scan(&SourceCursors::default());
+        println!("baseline(cwd-only) scan={:?}", t.elapsed());
+        let mut by: HashMap<String, u64> = HashMap::new();
+        for e in &events {
+            *by.entry(e.project.clone().unwrap_or_else(|| "(none)".into())).or_default() += e.total_tokens();
+        }
+        let mut v: Vec<_> = by.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("events={} scan1={first:?} scan2(cached)={second:?}", events.len());
+        for (p, t) in v.iter().take(15) {
+            println!("  {p:28} {:.2}B", *t as f64 / 1e9);
+        }
+    }
+
+    /// No tool call ever touches a repo → keep the launch cwd basename.
+    #[test]
+    fn session_without_repo_paths_keeps_cwd_project() {
+        let base = temp_root("repo-none");
+        fs::create_dir_all(base.join("scratch")).unwrap();
+        let b = base.to_string_lossy();
+        let launch = format!("{b}/launcher");
+        let lines = [
+            assistant_line(1, &launch, None),
+            assistant_line(2, &launch, Some(&format!("{b}/scratch/n.txt"))),
+        ]
+        .join("\n");
+        let root = base.join("logs");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("s2.jsonl"), lines).unwrap();
+        let mut source = ClaudeCodeSource::new(root);
+        source.repos = RepoResolver::with_prefix(&base);
+        let events = source.scan(&SourceCursors::default()).events;
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.project.as_deref() == Some("launcher")));
+    }
+
+    #[test]
+    fn extract_paths_stops_at_shell_delimiters() {
+        let cmd = r#"cd /h/u/proj/a && cat "/h/u/proj/b/f.rs"; ls /h/u"#;
+        let got = extract_paths(cmd, &["/h/u".to_string()]);
+        assert_eq!(got, vec!["/h/u/proj/a".to_string(), "/h/u/proj/b/f.rs".to_string()]);
+        // Inside a longer path (or a slugged dir name) is not a match.
+        assert!(extract_paths("/x/h/u/proj", &["/h/u".to_string()]).is_empty());
+        assert!(extract_paths("/tmp/-h/u-proj", &["/h/u".to_string()]).is_empty());
+    }
+
+    /// The record's own `cwd` (on every line) must not count as a tool path.
+    #[test]
+    fn cwd_field_on_tool_lines_is_not_a_repo_signal() {
+        let base = temp_root("repo-cwd");
+        for repo in ["launcher", "alpha"] {
+            fs::create_dir_all(base.join(repo).join(".git")).unwrap();
+        }
+        let b = base.to_string_lossy();
+        let launch = format!("{b}/launcher"); // a real repo, but only the launch dir
+        let lines = [
+            assistant_line(1, &launch, Some(&format!("{b}/alpha/x.rs"))),
+            assistant_line(2, &launch, Some("/tmp/not-home/y.rs")),
+            assistant_line(3, &launch, None),
+        ]
+        .join("\n");
+        let root = base.join("logs");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("s3.jsonl"), lines).unwrap();
+        let mut source = ClaudeCodeSource::new(root);
+        source.repos = RepoResolver::with_prefix(&base);
+        let events = source.scan(&SourceCursors::default()).events;
+        assert!(events.iter().all(|e| e.project.as_deref() == Some("alpha")), "{:?}",
+            events.iter().map(|e| e.project.clone()).collect::<Vec<_>>());
     }
 
     fn slots(ev: &UsageEvent) -> (u64, u64, u64, u64) {
