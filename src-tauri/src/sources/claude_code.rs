@@ -141,7 +141,8 @@ impl RepoResolver {
             .flat_map(|t| extract_paths(&t, &self.prefixes))
             // A dependency inside another repo (`…/argus/web/node_modules/
             // playwright`) is a tool being borrowed, not work on that repo.
-            .filter(|p| !p.contains("/node_modules/") && !p.ends_with("/node_modules"))
+            // Component-wise, so `\` separators (Windows) count too.
+            .filter(|p| !Path::new(p).components().any(|c| c.as_os_str() == "node_modules"))
             .collect();
         for path in paths {
             if let Some(repo) = self.repo_of_path(Path::new(&path)) {
@@ -559,17 +560,29 @@ mod tests {
     }
 
     /// One assistant record with usage, optionally carrying a tool call that
-    /// touches `tool_path` (Edit `file_path`).
+    /// touches `tool_path` (Edit `file_path`). Built with serde_json so
+    /// Windows paths (backslashes) are escaped like real logs.
     fn assistant_line(n: u32, cwd: &str, tool_path: Option<&str>) -> String {
         let content = match tool_path {
-            Some(p) => format!(
-                r#"[{{"type":"tool_use","id":"t{n}","name":"Edit","input":{{"file_path":"{p}","old_string":"a","new_string":"b"}}}}]"#
-            ),
-            None => r#"[{"type":"text","text":"hi"}]"#.to_string(),
+            Some(p) => serde_json::json!([{
+                "type": "tool_use", "id": format!("t{n}"), "name": "Edit",
+                "input": { "file_path": p, "old_string": "a", "new_string": "b" }
+            }]),
+            None => serde_json::json!([{ "type": "text", "text": "hi" }]),
         };
-        format!(
-            r#"{{"type":"assistant","cwd":"{cwd}","timestamp":"2026-07-13T01:0{n}:00Z","requestId":"r{n}","message":{{"id":"m{n}","model":"claude-opus-5","content":{content},"usage":{{"input_tokens":{n},"output_tokens":1}}}}}}"#
-        )
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "timestamp": format!("2026-07-13T01:0{n}:00Z"),
+            "requestId": format!("r{n}"),
+            "message": {
+                "id": format!("m{n}"),
+                "model": "claude-opus-5",
+                "content": content,
+                "usage": { "input_tokens": n, "output_tokens": 1 }
+            }
+        })
+        .to_string()
     }
 
     /// Repo attribution: turns follow the repo of the latest tool call; the
@@ -695,9 +708,15 @@ mod tests {
         }
         let b = base.to_string_lossy().into_owned();
         let mut r = RepoResolver::with_prefix(&base);
-        let cmd = format!(
-            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"cd ~/keeper && PLAYWRIGHT_MODULE={b}/argus/web/node_modules/playwright/index.mjs node x.mjs"}}}}]}}}}"#
+        let sep = std::path::MAIN_SEPARATOR;
+        let command = format!(
+            "cd ~/keeper && PLAYWRIGHT_MODULE={b}{sep}argus{sep}web{sep}node_modules{sep}playwright{sep}index.mjs node x.mjs"
         );
+        let cmd = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "tool_use", "name": "Bash", "input": { "command": command } }] }
+        })
+        .to_string();
         assert_eq!(r.repo_of_line(&cmd).as_deref(), Some("keeper"));
         assert_eq!(expand_home("cd ~/a; ls $HOME/b ${HOME}/c x~/d", Some("/H")), "cd /H/a; ls /H/b /H/c x~/d");
     }
