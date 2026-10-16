@@ -13,6 +13,7 @@
     onUsageUpdated,
     type Summary,
     type SourceSummary,
+    type WindowPace,
     type RateLimitStatus,
     type DevicesData,
     type DeviceSummary,
@@ -25,6 +26,7 @@
     formatResetLabel,
     parseResetDate,
     formatCountdown,
+    formatClock,
     windowLabel,
     type DateFormat,
     LABEL_ESTIMATED,
@@ -208,6 +210,8 @@
   }
 
   type UsageRow = {
+    /** Matches the backend WindowPace.key. */
+    key: string;
     label: string;
     percent: number;
     reset: string | null;
@@ -215,8 +219,37 @@
   };
   /** Normalize both the real `/usage` (cli) and Codex log (measured) readouts
    *  into one shape so both render as identical session/weekly bar rows. */
+  /** The backend forecast for a usage row, when it says something useful. */
+  function paceOf(s: SourceSummary, key: string): WindowPace | null {
+    const p = s.pace?.find((x) => x.key === key);
+    if (!p || p.status === "unknown" || p.status === "full") return null;
+    if (p.status !== "exhaust" && p.projected_at_reset === null) return null;
+    return p;
+  }
+
+  function paceText(p: WindowPace): string {
+    if (p.status === "exhaust" && p.eta_full) {
+      return `이 속도면 ${formatClock(new Date(p.eta_full), now)} 소진`;
+    }
+    const proj = Math.round(Math.min(100, p.projected_at_reset ?? 0));
+    return pctMode === "remaining"
+      ? `리셋 때 약 ${100 - proj}% 남을 예상`
+      : `리셋 때 약 ${proj}% 사용 예상`;
+  }
+
+  function paceTitle(p: WindowPace): string {
+    const parts: string[] = [];
+    if (p.rate_per_hour !== null) parts.push(`속도 시간당 ${p.rate_per_hour.toFixed(1)}%p`);
+    if (p.expected_percent !== null) {
+      parts.push(`균등하게 썼다면 지금 ${p.expected_percent.toFixed(0)}%`);
+    }
+    parts.push("최근 사용 속도가 유지된다고 가정한 예측");
+    return parts.join(" · ");
+  }
+
   function usageView(
     rl: RateLimitStatus,
+    id: string,
   ): { badge: string; rows: UsageRow[] } | null {
     if (rl === "unavailable" || "estimated" in rl) return null;
     if ("cli" in rl) {
@@ -225,6 +258,7 @@
         // The 5-hour session window carries its own reset — show it counting
         // down like the weekly rows instead of leaving the row bare.
         rows.push({
+          key: `${id}:session`,
           label: "세션",
           percent: rl.cli.session_percent,
           reset: formatResetLabel(rl.cli.session_resets_at, dateFmt),
@@ -233,6 +267,7 @@
       }
       for (const w of rl.cli.windows) {
         rows.push({
+          key: `${id}:${w.label}`,
           label: w.label === "all models" ? "주간" : `주간·${w.label}`,
           percent: w.used_percent,
           reset: formatResetLabel(w.resets_label, dateFmt),
@@ -246,6 +281,7 @@
     // position — the single window it currently reports is the weekly one.
     const rows: UsageRow[] = [
       {
+        key: `${id}:primary`,
         label: windowLabel(m.window_minutes),
         percent: m.primary_used_percent,
         reset: formatResetTime(m.resets_at, dateFmt),
@@ -254,6 +290,7 @@
     ];
     if (m.secondary_used_percent !== null) {
       rows.push({
+        key: `${id}:secondary`,
         label: "주간",
         percent: m.secondary_used_percent,
         reset: m.secondary_resets_at ? formatResetTime(m.secondary_resets_at, dateFmt) : null,
@@ -378,7 +415,7 @@
                 </span>
               </span>
             {:else}
-              {@const uv = usageView(s.rate_limit)}
+              {@const uv = usageView(s.rate_limit, s.id)}
               {#if uv}
                 <div class="usage">
                   <span class="lim-head"><b class="badge live">{uv.badge}</b></span>
@@ -402,6 +439,10 @@
                           </span>
                         {/if}
                       </span>
+                      {#if paceOf(s, r.key)}
+                        {@const pc = paceOf(s, r.key)!}
+                        <span class="pace {pc.status}" title={paceTitle(pc)}>{paceText(pc)}</span>
+                      {/if}
                     </div>
                   {/each}
                 </div>
@@ -800,6 +841,22 @@
     box-shadow: 0 0 10px color-mix(in srgb, #e0524f 60%, transparent);
   }
   .uwin.warn .uwin-pct { color: #e0a83a; }
+  /* Forecast line under a gauge: full row width, quiet unless it matters. */
+  .pace {
+    flex: 1 0 100%;
+    padding-left: calc(3.4em + 10px);
+    font-size: 0.68rem;
+    opacity: 0.55;
+  }
+  .pace.tight {
+    color: #e0a83a;
+    opacity: 0.95;
+  }
+  .pace.exhaust {
+    color: #e0524f;
+    opacity: 1;
+    font-weight: 700;
+  }
   .uwin.crit .uwin-pct { color: #e0524f; }
 
   .login-needed {

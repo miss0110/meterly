@@ -68,6 +68,26 @@ export interface SourceSummary {
   /** Whether the source appears signed in — drives the re-login prompt.
    *  "stale" = can't confirm and the plan data expired (usually a lapsed login). */
   auth: "ok" | "logged_out" | "stale";
+  /** Per plan window: speed, where it lands at reset, when it runs out. */
+  pace: WindowPace[];
+}
+
+/** Forecast for one plan window (backend `pace.rs`). */
+export interface WindowPace {
+  /** e.g. "claude_code:session", "claude_code:all models", "codex:primary". */
+  key: string;
+  label: string;
+  used_percent: number;
+  /** Share of the window's time elapsed — the even-use reference. */
+  expected_percent: number | null;
+  /** Percentage points per hour. */
+  rate_per_hour: number | null;
+  /** When it hits 100% at this speed — only if before the reset. */
+  eta_full: string | null;
+  /** Where it lands at reset at this speed (may exceed 100). */
+  projected_at_reset: number | null;
+  resets_at: string | null;
+  status: "exhaust" | "tight" | "ok" | "full" | "unknown";
 }
 
 export interface Summary {

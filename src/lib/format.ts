@@ -115,6 +115,17 @@ export function formatCountdown(d: Date, now: number = Date.now()): string {
   return `${Math.max(1, m)}분 후`;
 }
 
+/** Short local clock for a forecast: "15:40", "내일 09:00", "10/18 09:00". */
+export function formatClock(d: Date, now: number = Date.now()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(d) - day(new Date(now))) / 86_400_000);
+  if (diff === 0) return hm;
+  if (diff === 1) return `내일 ${hm}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
 /** Label a rate-limit window by its length (Codex reports `window_minutes`;
  *  300 = 5h session, 10080 = 7d weekly). */
 export function windowLabel(minutes: number): string {

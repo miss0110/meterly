@@ -53,6 +53,8 @@ pub struct Engine {
     /// (reset id, highest threshold already notified). Re-arms when the
     /// window's reset id changes. In-memory — a restart may re-notify once.
     alert_state: HashMap<String, (String, u8)>,
+    /// Plan-window pace history + queued reset / run-out notifications.
+    pace: crate::pace::PaceTracker,
     /// Logged-in account per source (read once from local auth files).
     claude_account: Option<String>,
     codex_account: Option<String>,
@@ -92,6 +94,8 @@ pub struct SourceSummary {
     pub account: Option<String>,
     /// Whether the source appears signed in — drives the re-login prompt.
     pub auth: crate::model::AuthState,
+    /// Per plan window: speed, where it lands at reset, when it runs out.
+    pub pace: Vec<crate::pace::WindowPace>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -335,6 +339,7 @@ impl Engine {
             cache,
             runtimes,
             alert_state: HashMap::new(),
+            pace: crate::pace::PaceTracker::default(),
             claude_account: crate::accounts::claude_account(),
             codex_account: crate::accounts::codex_account(),
         }
@@ -502,7 +507,15 @@ impl Engine {
             crate::logging::warn(&format!("cache save failed: {err}"));
         }
 
-        let summary = self.summary();
+        let mut summary = self.summary();
+        // Pace: record this cycle's readings (queues reset / run-out alerts),
+        // then recompute the forecast with the new sample included.
+        let now = Utc::now();
+        for s in &summary.sources {
+            let wins = crate::pace::windows(s.id.as_str(), &s.rate_limit, now);
+            self.pace.record(&s.display_name, &wins, now);
+        }
+        self.fill_pace(&mut summary, now);
         // Compact per-cycle line — the main signal for "is it collecting?" on a
         // user's machine. Unhealthy sources are called out at WARN.
         let parts: Vec<String> = summary
@@ -743,13 +756,31 @@ impl Engine {
                     last7_totals,
                     account,
                     auth,
+                    pace: Vec::new(),
                 }
             })
             .collect();
-        Summary {
+        let mut summary = Summary {
             generated_at: now,
             sources,
+        };
+        self.fill_pace(&mut summary, now);
+        summary
+    }
+
+    /// Attach each source's plan-window forecast (no recording — read-only).
+    fn fill_pace(&self, summary: &mut Summary, now: chrono::DateTime<Utc>) {
+        for s in &mut summary.sources {
+            s.pace = crate::pace::windows(s.id.as_str(), &s.rate_limit, now)
+                .iter()
+                .map(|w| self.pace.compute(w, now))
+                .collect();
         }
+    }
+
+    /// Reset / run-out notifications queued by the last refresh.
+    pub fn pace_notifications(&mut self) -> Vec<(String, String)> {
+        self.pace.take_notifications()
     }
 
     pub fn dashboard(&self, range: &str, scope: &str) -> DashboardData {
@@ -1120,16 +1151,6 @@ fn threshold_crossing(prior_max: u8, percent: f64, thresholds: &[u8]) -> Option<
     (crossed > prior_max).then_some(crossed)
 }
 
-/// Korean window label from a Codex window length (mirrors `windowLabel` in
-/// format.ts): 300m → 세션, 10080m → 주간, else "N분".
-fn window_label_kr(minutes: u64) -> String {
-    match minutes {
-        300 => "세션".into(),
-        10080 => "주간".into(),
-        m => format!("{m}분"),
-    }
-}
-
 /// One limit gauge to watch for threshold crossings.
 struct Gauge {
     /// Stable per-window key (source + window) for dedup.
@@ -1143,53 +1164,26 @@ struct Gauge {
     reset_hint: Option<String>,
 }
 
-/// Flatten a source's rate limit into the gauges to watch. Covers both the
-/// Claude `/usage` (Cli) windows and the Codex app-server (Measured) windows.
+/// Flatten a source's rate limit into the gauges to watch: every plan window
+/// (Claude session + weekly, Codex primary + weekly). The reset id is the
+/// reset instant rounded to 30 min, so the same reset printed as ISO or as
+/// `/usage` text doesn't re-arm the alerts.
 fn gauges(s: &SourceSummary) -> Vec<Gauge> {
-    let sid = s.id.as_str();
-    match &s.rate_limit {
-        RateLimitStatus::Cli { windows, .. } => windows
-            .iter()
-            .map(|w| Gauge {
-                key: format!("{sid}:{}", w.label),
-                label: if w.label == "all models" {
-                    "주간".into()
-                } else {
-                    format!("주간·{}", w.label)
-                },
-                percent: w.used_percent,
-                reset_id: w.resets_label.clone().unwrap_or_default(),
-                reset_hint: w.resets_label.clone(),
-            })
-            .collect(),
-        RateLimitStatus::Measured {
-            primary_used_percent,
-            secondary_used_percent,
-            window_minutes,
-            resets_at,
-            secondary_resets_at,
-        } => {
-            let fmt = |r: &chrono::DateTime<Utc>| r.with_timezone(&Local).format("%m/%d %H:%M").to_string();
-            let mut g = vec![Gauge {
-                key: format!("{sid}:primary"),
-                label: window_label_kr(*window_minutes),
-                percent: *primary_used_percent,
-                reset_id: resets_at.timestamp().to_string(),
-                reset_hint: Some(fmt(resets_at)),
-            }];
-            if let Some(sp) = secondary_used_percent {
-                g.push(Gauge {
-                    key: format!("{sid}:secondary"),
-                    label: "주간".into(),
-                    percent: *sp,
-                    reset_id: secondary_resets_at.map(|r| r.timestamp().to_string()).unwrap_or_default(),
-                    reset_hint: secondary_resets_at.as_ref().map(fmt),
-                });
-            }
-            g
-        }
-        _ => vec![],
-    }
+    let now = Utc::now();
+    crate::pace::windows(s.id.as_str(), &s.rate_limit, now)
+        .into_iter()
+        .map(|w| Gauge {
+            reset_id: crate::pace::period_id(w.resets_at)
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
+            reset_hint: w
+                .resets_at
+                .map(|r| r.with_timezone(&Local).format("%m/%d %H:%M").to_string()),
+            key: w.key,
+            label: w.label,
+            percent: w.used_percent,
+        })
+        .collect()
 }
 
 impl Engine {
@@ -1416,8 +1410,12 @@ pub fn refresh_and_publish(app: &AppHandle) -> Option<Summary> {
         let mut engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
         let summary = engine.refresh();
         // Alerts on by default; the Settings toggle silences both kinds.
+        // Always drain the pace queue (so a muted period doesn't flush later).
+        let pace_notes = engine.pace_notifications();
         let mut notifications = if engine.cache.alerts_enabled.unwrap_or(true) {
-            engine.limit_notification(&summary)
+            let mut n = engine.limit_notification(&summary);
+            n.extend(pace_notes);
+            n
         } else {
             Vec::new()
         };
@@ -1901,6 +1899,7 @@ mod tests {
             last7_totals: vec![],
             account: None,
             auth: crate::model::AuthState::Ok,
+            pace: vec![],
         }
     }
 
@@ -1925,11 +1924,15 @@ mod tests {
                 ],
             },
         );
+        // The 5-hour session is watched too (it used to be left out).
         let g = gauges(&claude);
-        assert_eq!(g.len(), 2);
-        assert_eq!(g[0].label, "주간");
-        assert_eq!(g[0].percent, 72.0);
-        assert_eq!(g[1].label, "주간·Fable");
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0].label, "세션");
+        assert_eq!(g[1].label, "주간");
+        assert_eq!(g[1].percent, 72.0);
+        assert!(!g[1].reset_id.is_empty(), "parsed reset → period id");
+        assert_eq!(g[2].label, "주간·Fable");
+        assert!(g[2].reset_id.is_empty(), "no reset known");
 
         let codex = source(
             SourceId::Codex,

@@ -320,8 +320,12 @@
         <h2>알림</h2>
         <label class="row-toggle">
           <input type="checkbox" checked={s.alerts_enabled} onchange={toggleAlerts} />
-          한도 사용률 알림 · 주간 리포트
+          한도 사용률 알림 · 소진 예상 · 리셋 · 주간 리포트
         </label>
+        <p class="muted small">
+          임계치를 넘을 때, 지금 속도면 리셋 전에 한도가 바닥날 때(사용률 30% 이상, 한 주기에 한 번),
+          70% 이상 썼던 한도가 리셋됐을 때 알려 줍니다.
+        </p>
         <label class="row-select">
           알림 임계치 (%)
           <input

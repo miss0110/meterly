@@ -6,6 +6,7 @@ pub mod devicesync;
 pub mod logging;
 pub mod model;
 pub mod orgreport;
+pub mod pace;
 pub mod pricing;
 pub mod pricing_sync;
 pub mod scheduler;
