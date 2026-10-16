@@ -958,6 +958,45 @@ pub struct HeatmapCell {
     pub total: u64,
 }
 
+/// Waste-pattern insights over the session-detail window (this device).
+#[derive(Debug, Clone, Serialize)]
+pub struct Insights {
+    pub days: i64,
+    pub requests: u64,
+    /// Average context re-read per request.
+    pub avg_context: u64,
+    /// Requests with a context ≥ `big_context_threshold`, and their share of
+    /// all tokens (cost proxy that works for unpriced models too).
+    pub big_requests: u64,
+    pub big_token_share: f64,
+    pub big_context_threshold: u64,
+    /// Pauses (> `idle_gap_minutes`) after which a large context was written
+    /// to the cache again, and what that cost over reading it.
+    pub idle_rebuilds: u64,
+    pub idle_rebuild_extra_usd: Option<f64>,
+    pub idle_gap_minutes: i64,
+    /// Sessions worth a look, worst first.
+    pub sessions: Vec<SessionInsight>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionInsight {
+    pub session_id: String,
+    pub source: SourceId,
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub requests: u64,
+    pub avg_context: u64,
+    pub max_context: u64,
+    pub idle_rebuilds: u64,
+    pub idle_rebuild_extra_usd: Option<f64>,
+    pub cost_usd: Option<f64>,
+    pub last_at: chrono::DateTime<Utc>,
+    /// "compact" (lives in a huge context) / "new_session" (resumed after
+    /// pauses and re-paid the cache).
+    pub advice: Vec<String>,
+}
+
 /// One session's usage for a day — the "가장 비싼 세션" list. Local only.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionUsage {
@@ -1086,6 +1125,125 @@ impl Engine {
         });
         out.truncate(limit);
         out
+    }
+
+    /// Waste patterns over the last `days` (≤ the session-detail retention):
+    /// big contexts and idle cache rebuilds, overall and per session.
+    pub fn insights(&self, days: i64) -> Insights {
+        use crate::aggregate::{BIG_CONTEXT_TOKENS, IDLE_REBUILD_MIN_GAP, SESSION_RETENTION_DAYS};
+        let days = days.clamp(1, SESSION_RETENTION_DAYS);
+        let from = Local::now().date_naive() - chrono::Duration::days(days - 1);
+        let buckets: Vec<&crate::aggregate::SessionBucket> = self
+            .cache
+            .sessions_claude
+            .iter()
+            .chain(self.cache.sessions_codex.iter())
+            .filter(|b| b.date >= from)
+            .collect();
+
+        let requests: u64 = buckets.iter().map(|b| b.requests).sum();
+        let ctx: u64 = buckets.iter().map(|b| b.context_tokens()).sum();
+        let total: u64 = buckets.iter().map(|b| b.total()).sum();
+        let big_requests: u64 = buckets.iter().map(|b| b.big_requests).sum();
+        let big_tokens: u64 = buckets.iter().map(|b| b.big_tokens).sum();
+        let idle_rebuilds: u64 = buckets.iter().map(|b| b.idle_rebuilds).sum();
+        let mut idle_extra: Option<f64> = None;
+        for b in &buckets {
+            if b.idle_rebuilds > 0 {
+                if let Some(x) = b.idle_rebuild_extra_usd() {
+                    *idle_extra.get_or_insert(0.0) += x;
+                }
+            }
+        }
+
+        // Per session (folding days, models and projects).
+        #[derive(Default)]
+        struct Acc {
+            requests: u64,
+            ctx: u64,
+            max: u64,
+            rebuilds: u64,
+            extra: Option<f64>,
+            cost: Option<f64>,
+            last: Option<chrono::DateTime<Utc>>,
+            models: HashMap<Option<String>, u64>,
+            projects: HashMap<Option<String>, u64>,
+        }
+        let mut per: HashMap<(SourceId, String), Acc> = HashMap::new();
+        for b in &buckets {
+            let a = per.entry((b.source, b.session_id.clone())).or_default();
+            a.requests += b.requests;
+            a.ctx += b.context_tokens();
+            a.max = a.max.max(b.ctx_max);
+            a.rebuilds += b.idle_rebuilds;
+            if b.idle_rebuilds > 0 {
+                if let Some(x) = b.idle_rebuild_extra_usd() {
+                    *a.extra.get_or_insert(0.0) += x;
+                }
+            }
+            if let Some(c) = b.cost_usd() {
+                *a.cost.get_or_insert(0.0) += c;
+            }
+            a.last = Some(a.last.map_or(b.last_at, |l| l.max(b.last_at)));
+            *a.models.entry(b.model.clone()).or_default() += b.total();
+            *a.projects.entry(b.project.clone()).or_default() += b.total();
+        }
+        let dominant = |m: &HashMap<Option<String>, u64>| {
+            m.iter()
+                .filter(|(k, _)| k.is_some())
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                .and_then(|(k, _)| k.clone())
+        };
+        let mut sessions: Vec<SessionInsight> = per
+            .into_iter()
+            .filter(|(_, a)| a.requests >= 10)
+            .filter_map(|((source, session_id), a)| {
+                let avg = a.ctx / a.requests.max(1);
+                let mut advice = Vec::new();
+                if avg >= BIG_CONTEXT_TOKENS {
+                    advice.push("compact".to_string());
+                }
+                if a.rebuilds >= 1 {
+                    advice.push("new_session".to_string());
+                }
+                (!advice.is_empty()).then(|| SessionInsight {
+                    session_id,
+                    source,
+                    project: dominant(&a.projects),
+                    model: dominant(&a.models),
+                    requests: a.requests,
+                    avg_context: avg,
+                    max_context: a.max,
+                    idle_rebuilds: a.rebuilds,
+                    idle_rebuild_extra_usd: a.extra,
+                    cost_usd: a.cost,
+                    last_at: a.last.unwrap_or_else(Utc::now),
+                    advice,
+                })
+            })
+            .collect();
+        // Worst first: what the session cost, then how big it ran.
+        sessions.sort_by(|a, b| {
+            b.cost_usd
+                .unwrap_or(0.0)
+                .partial_cmp(&a.cost_usd.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.avg_context.cmp(&a.avg_context))
+        });
+        sessions.truncate(5);
+
+        Insights {
+            days,
+            requests,
+            avg_context: ctx / requests.max(1),
+            big_requests,
+            big_token_share: if total > 0 { big_tokens as f64 / total as f64 } else { 0.0 },
+            big_context_threshold: BIG_CONTEXT_TOKENS,
+            idle_rebuilds,
+            idle_rebuild_extra_usd: idle_extra,
+            idle_gap_minutes: IDLE_REBUILD_MIN_GAP,
+            sessions,
+        }
     }
 
     /// Export the current range's aggregate rows to ~/Downloads.

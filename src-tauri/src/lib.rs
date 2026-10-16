@@ -324,6 +324,7 @@ pub fn run() {
             commands::open_dashboard,
             commands::get_heatmap,
             commands::get_sessions,
+            commands::get_insights,
             commands::export_data,
             commands::get_devices,
             commands::get_settings,

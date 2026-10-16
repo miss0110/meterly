@@ -6,11 +6,13 @@
     getDevices,
     getHeatmap,
     getSessions,
+    getInsights,
     exportData,
     onUsageUpdated,
     type DashboardData,
     type HeatmapCell,
     type SessionUsage,
+    type Insights,
     type SourceId,
     type TokenBreakdown,
     type Range,
@@ -53,6 +55,7 @@
   // Heatmap tool filter: both tools, or one source.
   let heatSource = $state<SourceId | "all">("all");
   let sessions = $state<SessionUsage[]>([]);
+  let insights = $state<Insights | null>(null);
   let sessionDay = $state<"today" | "yesterday">("today");
   let exportMsg = $state<string | null>(null);
   let trendCanvas: HTMLCanvasElement;
@@ -86,7 +89,23 @@
     }
     heatmap = await getHeatmap(heatSource);
     await loadSessions();
+    try {
+      insights = await getInsights(7);
+    } catch (e) {
+      console.error("insights failed", e);
+    }
   }
+
+  const ADVICE: Record<string, { label: string; tip: string }> = {
+    compact: {
+      label: "/compact",
+      tip: "요청마다 큰 대화 전체를 다시 읽고 있어요. /compact로 요약하거나 작업 단위로 새 세션을 시작하면 줄어듭니다.",
+    },
+    new_session: {
+      label: "새 세션",
+      tip: "한참 쉬었다가 큰 대화를 이어 가면 캐시가 만료돼 전체를 비싼 단가로 다시 씁니다. 쉬고 돌아오면 /clear나 새 세션으로 시작하세요.",
+    },
+  };
 
   /** Local calendar date `offset` days from today, YYYY-MM-DD. */
   function localDay(offset: number): string {
@@ -472,6 +491,63 @@
       <p class="muted small empty">{sessionDay === "today" ? "오늘" : "어제"} 기록된 세션이 없습니다.</p>
     {/if}
   </section>
+
+  {#if insights && insights.requests > 0}
+    {@const ins = insights}
+    {@const bigPct = (ins.big_requests / ins.requests) * 100}
+    <section class="panel">
+      <h2>절약 인사이트 <span class="muted">최근 {ins.days}일 · 이 기기</span></h2>
+      <div class="ins-kpis">
+        <div class="kpi" title="요청 한 번마다 모델이 다시 읽는 대화 길이(입력+캐시)의 평균">
+          <span class="kpi-k">요청당 평균 컨텍스트</span>
+          <span class="kpi-v">{formatTokens(ins.avg_context)}<span class="unit">tok</span></span>
+          <span class="kpi-s">요청 {ins.requests.toLocaleString()}회 기준</span>
+        </div>
+        <div class="kpi" title={`컨텍스트가 ${formatTokens(ins.big_context_threshold)} 이상인 요청`}>
+          <span class="kpi-k">{Math.round(ins.big_context_threshold / 1000)}K+ 컨텍스트</span>
+          <span class="kpi-v" class:warn={bigPct >= 50}>{bigPct.toFixed(0)}<span class="unit">% 요청</span></span>
+          <span class="kpi-s">전체 토큰의 {(ins.big_token_share * 100).toFixed(0)}%</span>
+        </div>
+        <div class="kpi" title={`${ins.idle_gap_minutes}분 넘게 쉰 뒤 큰 대화를 이어 가서 캐시를 다시 쓴 횟수 — 캐시에서 읽었다면 아꼈을 금액`}>
+          <span class="kpi-k">쉬었다 재개 · 캐시 재작성</span>
+          <span class="kpi-v" class:warn={ins.idle_rebuilds > 0}>{ins.idle_rebuilds}<span class="unit">회</span></span>
+          <span class="kpi-s">
+            {ins.idle_rebuild_extra_usd !== null ? `+${formatCost(ins.idle_rebuild_extra_usd)} 추가 (${LABEL_COST})` : "추가 비용 N/A"}
+          </span>
+        </div>
+      </div>
+      {#if ins.sessions.length}
+        <div class="rows ins-rows">
+          {#each ins.sessions as s (s.source + s.session_id)}
+            <div class="ins-row" style={`--accent:${t.sources[s.source] ?? "#8a8983"}`}>
+              <span class="r-name" title={s.project ?? "프로젝트 미기록"}>
+                <span class="src-dot" title={SOURCE_LABELS[s.source]}></span>
+                {s.project ?? "(미분류)"}
+              </span>
+              <span class="r-name mono">{s.model ?? "unknown"}</span>
+              <span class="r-sub" title="요청당 평균 / 최대 컨텍스트">
+                평균 {formatTokens(s.avg_context)} · 최대 {formatTokens(s.max_context)}
+              </span>
+              <span class="r-sub">
+                {#if s.idle_rebuilds > 0}
+                  재작성 {s.idle_rebuilds}회{s.idle_rebuild_extra_usd !== null ? ` · +${formatCost(s.idle_rebuild_extra_usd)}` : ""}
+                {:else}—{/if}
+              </span>
+              <span class="advice">
+                {#each s.advice as a (a)}
+                  <span class="chip-adv" title={ADVICE[a]?.tip}>{ADVICE[a]?.label ?? a}</span>
+                {/each}
+              </span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <p class="insight">
+        큰 대화는 <b>/compact</b>로 요약하고, 한참 쉬었다 돌아오면 <b>/clear</b>나 새 세션으로 시작하면
+        다시 읽는 양과 캐시 재작성이 줄어 한도도 덜 소모됩니다.
+      </p>
+    </section>
+  {/if}
 
   {#if scope === "all" && data && data.devices.length}
     <section class="panel">
@@ -1109,6 +1185,46 @@
   }
   .empty {
     margin: 0.2rem 0 0;
+  }
+  /* Insights */
+  .ins-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.75rem;
+  }
+  .kpi-v.warn {
+    color: #e0a83a;
+  }
+  .ins-rows {
+    margin-top: 0.75rem;
+  }
+  .ins-row {
+    display: grid;
+    /* Fixed tracks so every row lines up (each row is its own grid). */
+    grid-template-columns: minmax(6rem, 1fr) minmax(8rem, 1fr) 12.5rem 8.5rem 8rem;
+    gap: 0.9rem;
+    align-items: center;
+    padding: 0.42rem 0.55rem;
+    border-radius: 10px;
+    font-size: 0.86rem;
+  }
+  .ins-row:hover {
+    background: color-mix(in srgb, currentColor 5%, transparent);
+  }
+  .advice {
+    display: inline-flex;
+    gap: 5px;
+    justify-content: flex-end;
+  }
+  .chip-adv {
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: #e0a83a;
+    background: color-mix(in srgb, #e0a83a 14%, transparent);
+    cursor: help;
+    white-space: nowrap;
   }
   .proj-row { grid-template-columns: minmax(7rem, 1.3fr) 3fr auto auto; }
   .mc-row { grid-template-columns: minmax(9rem, 1.4fr) 3fr auto 3.2rem; }

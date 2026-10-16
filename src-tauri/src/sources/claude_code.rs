@@ -647,6 +647,21 @@ mod tests {
         let mut v: Vec<_> = by.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
         println!("events={} scan1={first:?} scan2(cached)={second:?}", events.len());
+        // Insights inputs over the last 7 days (dashboard "절약 인사이트").
+        let mut sb = Vec::new();
+        let from = chrono::Local::now().date_naive() - chrono::Duration::days(6);
+        crate::aggregate::ingest_sessions(&mut sb, &events, from);
+        let req: u64 = sb.iter().map(|b| b.requests).sum();
+        let big: u64 = sb.iter().map(|b| b.big_requests).sum();
+        let big_tok: u64 = sb.iter().map(|b| b.big_tokens).sum();
+        let tot: u64 = sb.iter().map(|b| b.total()).sum();
+        let rb: u64 = sb.iter().map(|b| b.idle_rebuilds).sum();
+        let extra: f64 = sb.iter().filter(|b| b.idle_rebuilds > 0).filter_map(|b| b.idle_rebuild_extra_usd()).sum();
+        let ctx: u64 = sb.iter().map(|b| b.context_tokens()).sum();
+        println!(
+            "7d: requests={req} avg_ctx={}K big(>=300K)={big} ({:.0}% of req, {:.0}% of tokens) idle_rebuilds={rb} extra=${extra:.0}",
+            ctx / req.max(1) / 1000, big as f64 / req.max(1) as f64 * 100.0, big_tok as f64 / tot.max(1) as f64 * 100.0
+        );
         // Yesterday's sessions, split by project (dashboard "어제" check).
         let yday = chrono::Local::now().date_naive() - chrono::Duration::days(1);
         let mut sess: HashMap<String, HashMap<String, u64>> = HashMap::new();

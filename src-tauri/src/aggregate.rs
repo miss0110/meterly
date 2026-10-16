@@ -4,6 +4,8 @@
 //! Day boundary = SYSTEM LOCAL timezone midnight (injectable for tests).
 //! Note: other tools may bucket by UTC — the dashboard shows a tz tooltip.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -158,6 +160,16 @@ pub fn prune(buckets: &mut Vec<DailyBucket>, window_start: NaiveDate) {
     buckets.retain(|b| b.date >= window_start);
 }
 
+/// A request re-reading at least this much context is "big" — the insights
+/// panel suggests /compact or a fresh session for sessions that live there.
+/// (2026-10 data: requests ≥300K were ~half of all requests and most of cost.)
+pub const BIG_CONTEXT_TOKENS: u64 = 300_000;
+/// Anthropic's default prompt-cache TTL. A request after a longer pause that
+/// re-writes most of a large context paid the cache-write price again.
+pub const IDLE_REBUILD_MIN_GAP: i64 = 5; // minutes
+/// Only contexts at least this big count as a costly rebuild.
+pub const IDLE_REBUILD_MIN_CONTEXT: u64 = 100_000;
+
 /// Days of per-session detail kept locally — the "가장 비싼 세션" list. Small
 /// (a few hundred rows) and never synced or reported.
 pub const SESSION_RETENTION_DAYS: i64 = 7;
@@ -185,9 +197,39 @@ pub struct SessionBucket {
     pub cache_creation: u64,
     pub first_at: DateTime<Utc>,
     pub last_at: DateTime<Utc>,
+    /// Requests (assistant turns with usage) in this bucket.
+    #[serde(default)]
+    pub requests: u64,
+    /// Largest context (input + cache read + cache write) of one request.
+    #[serde(default)]
+    pub ctx_max: u64,
+    /// Requests whose context was ≥ BIG_CONTEXT_TOKENS, and their tokens.
+    #[serde(default)]
+    pub big_requests: u64,
+    #[serde(default)]
+    pub big_tokens: u64,
+    /// Requests that followed a pause > IDLE_REBUILD_MIN_GAP and re-wrote
+    /// most of a ≥ IDLE_REBUILD_MIN_CONTEXT context, and the tokens written.
+    #[serde(default)]
+    pub idle_rebuilds: u64,
+    #[serde(default)]
+    pub idle_rebuild_tokens: u64,
 }
 
 impl SessionBucket {
+    /// Context tokens summed over requests (everything but output).
+    pub fn context_tokens(&self) -> u64 {
+        self.input + self.cache_read + self.cache_creation
+    }
+
+    /// Extra USD paid because idle rebuilds wrote the cache instead of
+    /// reading it (write price − read price), at API list prices.
+    pub fn idle_rebuild_extra_usd(&self) -> Option<f64> {
+        let model = self.model.as_deref()?;
+        let t = self.idle_rebuild_tokens;
+        Some(pricing::cost_usd(model, 0, 0, 0, t)? - pricing::cost_usd(model, 0, 0, t, 0)?)
+    }
+
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_creation
     }
@@ -205,14 +247,25 @@ impl SessionBucket {
 }
 
 /// Fold events into per-session buckets (local date), dropping events before
-/// `window_start`. Keyed on the project too: one session can move between
+/// `window_start`. Also tallies context size and idle cache rebuilds; the gap
+/// before a request is measured against the previous request of the same
+/// session in `events` (Claude passes a full re-parse, so it's complete). Keyed on the project too: one session can move between
 /// repos, and the dashboard names a session after the repo it spent most in.
 pub fn ingest_sessions(
     buckets: &mut Vec<SessionBucket>,
     events: &[UsageEvent],
     window_start: NaiveDate,
 ) {
-    for ev in events {
+    // Time order within each session, for the idle-gap check.
+    let mut order: Vec<usize> = (0..events.len()).collect();
+    order.sort_by(|&a, &b| {
+        (&events[a].session_id, events[a].timestamp).cmp(&(&events[b].session_id, events[b].timestamp))
+    });
+    let mut prev_at: HashMap<&str, DateTime<Utc>> = HashMap::new();
+    for ev in order.into_iter().map(|i| &events[i]) {
+        let gap = prev_at
+            .insert(ev.session_id.as_str(), ev.timestamp)
+            .map(|p| ev.timestamp - p);
         let date = local_date(ev.timestamp);
         if date < window_start {
             continue;
@@ -239,6 +292,12 @@ pub fn ingest_sessions(
                     cache_creation: 0,
                     first_at: ev.timestamp,
                     last_at: ev.timestamp,
+                    requests: 0,
+                    ctx_max: 0,
+                    big_requests: 0,
+                    big_tokens: 0,
+                    idle_rebuilds: 0,
+                    idle_rebuild_tokens: 0,
                 });
                 buckets.last_mut().expect("just pushed")
             }
@@ -247,6 +306,18 @@ pub fn ingest_sessions(
         b.output += ev.output_tokens;
         b.cache_read += ev.cache_read_tokens;
         b.cache_creation += ev.cache_creation_tokens;
+        let ctx = ev.input_tokens + ev.cache_read_tokens + ev.cache_creation_tokens;
+        b.requests += 1;
+        b.ctx_max = b.ctx_max.max(ctx);
+        if ctx >= BIG_CONTEXT_TOKENS {
+            b.big_requests += 1;
+            b.big_tokens += ev.total_tokens();
+        }
+        let idle = gap.is_some_and(|g| g > Duration::minutes(IDLE_REBUILD_MIN_GAP));
+        if idle && ctx >= IDLE_REBUILD_MIN_CONTEXT && ev.cache_creation_tokens * 2 >= ctx {
+            b.idle_rebuilds += 1;
+            b.idle_rebuild_tokens += ev.cache_creation_tokens;
+        }
         if ev.timestamp < b.first_at {
             b.first_at = ev.timestamp;
         }
@@ -428,6 +499,42 @@ mod tests {
         assert_eq!(s1.project.as_deref(), Some("proj"));
         prune_sessions(&mut b, NaiveDate::from_ymd_opt(2026, 9, 19).unwrap());
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn sessions_tally_big_context_and_idle_cache_rebuilds() {
+        let base = Local.with_ymd_and_hms(2026, 9, 18, 10, 0, 0).unwrap().with_timezone(&Utc);
+        let mk = |min: i64, cr: u64, cw: u64| UsageEvent {
+            source: SourceId::ClaudeCode,
+            session_id: "s".into(),
+            dedup_key: None,
+            timestamp: base + Duration::minutes(min),
+            model: Some("claude-opus-5".into()),
+            project: Some("p".into()),
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_tokens: cr,
+            cache_creation_tokens: cw,
+        };
+        // Out of order on purpose: gaps are measured in time order.
+        let events = vec![
+            mk(2, 390_000, 9_000),  // 2 min later, warm cache: big, not idle
+            mk(0, 0, 150_000),      // session start (no previous) → not a rebuild
+            mk(70, 5_000, 395_000), // 68 min idle, re-wrote the context → rebuild
+            mk(72, 2_000, 40_000),  // small context
+        ];
+        let mut b = Vec::new();
+        ingest_sessions(&mut b, &events, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
+        assert_eq!(b.len(), 1);
+        let s = &b[0];
+        assert_eq!(s.requests, 4);
+        assert_eq!(s.ctx_max, 401_000);
+        assert_eq!(s.big_requests, 2);
+        assert_eq!(s.idle_rebuilds, 1);
+        assert_eq!(s.idle_rebuild_tokens, 395_000);
+        // Opus 5: write 6.25 − read 0.50 per Mtok on 395K tokens ≈ $2.27.
+        let extra = s.idle_rebuild_extra_usd().unwrap();
+        assert!((extra - 0.395 * 5.75).abs() < 0.01, "{extra}");
     }
 
     #[test]

@@ -3,8 +3,8 @@
 use tauri::{AppHandle, Manager, State};
 
 use crate::scheduler::{
-    refresh_and_publish, AppState, DashboardData, DevicesData, HeatmapCell, SessionUsage,
-    Summary,
+    refresh_and_publish, AppState, DashboardData, DevicesData, HeatmapCell, Insights,
+    SessionUsage, Summary,
 };
 
 #[tauri::command]
@@ -37,6 +37,14 @@ pub fn get_dashboard(
 pub fn get_heatmap(state: State<'_, AppState>, source: Option<String>) -> Vec<HeatmapCell> {
     let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
     engine.heatmap(source.as_deref())
+}
+
+/// Waste-pattern insights (big contexts, idle cache rebuilds) over the last
+/// `days` (default 7 = the session-detail retention). This device only.
+#[tauri::command]
+pub fn get_insights(state: State<'_, AppState>, days: Option<i64>) -> Insights {
+    let engine = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    engine.insights(days.unwrap_or(7))
 }
 
 /// Most expensive sessions of a local day (`day` = YYYY-MM-DD, default today),

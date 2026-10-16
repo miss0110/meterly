@@ -255,6 +255,39 @@ export const refreshNow = () => invoke<Summary | null>("refresh_now");
 /** source: "all" (both tools) | a SourceId to narrow the heatmap to one tool. */
 export const getHeatmap = (source: SourceId | "all" = "all") =>
   invoke<HeatmapCell[]>("get_heatmap", { source: source === "all" ? null : source });
+/** Waste-pattern insights (backend `Engine::insights`), this device. */
+export interface SessionInsight {
+  session_id: string;
+  source: SourceId;
+  project: string | null;
+  model: string | null;
+  requests: number;
+  avg_context: number;
+  max_context: number;
+  idle_rebuilds: number;
+  idle_rebuild_extra_usd: number | null;
+  cost_usd: number | null;
+  last_at: string;
+  /** "compact" | "new_session" */
+  advice: string[];
+}
+
+export interface Insights {
+  days: number;
+  requests: number;
+  avg_context: number;
+  big_requests: number;
+  /** 0..1 share of all tokens spent in big-context requests. */
+  big_token_share: number;
+  big_context_threshold: number;
+  idle_rebuilds: number;
+  idle_rebuild_extra_usd: number | null;
+  idle_gap_minutes: number;
+  sessions: SessionInsight[];
+}
+
+export const getInsights = (days = 7) => invoke<Insights>("get_insights", { days });
+
 /** day: YYYY-MM-DD local (default today); highest cost first. */
 export const getSessions = (day?: string, limit = 5) =>
   invoke<SessionUsage[]>("get_sessions", { day: day ?? null, limit });
